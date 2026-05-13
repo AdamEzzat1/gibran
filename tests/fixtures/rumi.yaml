@@ -1,0 +1,138 @@
+sources:
+  - id: orders
+    display_name: Orders
+    type: parquet
+    uri: tests/data/orders.parquet
+    primary_grain: order_id
+    columns:
+      - name: order_id
+        type: VARCHAR
+        sensitivity: public
+      - name: amount
+        type: DECIMAL(18,2)
+        sensitivity: public
+      - name: order_date
+        type: TIMESTAMP
+        sensitivity: public
+      - name: status
+        type: VARCHAR
+        sensitivity: public
+      - name: region
+        type: VARCHAR
+        sensitivity: public
+      - name: customer_email
+        type: VARCHAR
+        sensitivity: pii
+    dimensions:
+      - id: orders.region
+        column: region
+        display_name: Region
+        type: categorical
+      - id: orders.order_date
+        column: order_date
+        display_name: Order Date
+        type: temporal
+
+metrics:
+  - id: order_count
+    source: orders
+    display_name: Order Count
+    type: count
+    description: Total number of orders.
+  - id: gross_revenue
+    source: orders
+    display_name: Gross Revenue
+    type: sum
+    expression: amount
+    filter: status = 'paid'
+    unit: USD
+    description: Sum of paid order amounts.
+  - id: avg_order_value
+    source: orders
+    display_name: Average Order Value
+    type: ratio
+    numerator: gross_revenue
+    denominator: order_count
+    unit: USD
+    description: Gross revenue per order.
+  - id: revenue_per_paid_order
+    source: orders
+    display_name: Revenue Per Paid Order
+    type: expression
+    expression: "{gross_revenue} / NULLIF({order_count}, 0)"
+    unit: USD
+    description: Equivalent to avg_order_value but defined via expression template.
+  - id: p95_amount
+    source: orders
+    display_name: P95 Order Amount
+    type: percentile
+    column: amount
+    p: 0.95
+    unit: USD
+    description: 95th percentile of order amount across all rows.
+  - id: revenue_7d_rolling
+    source: orders
+    display_name: 7-Day Rolling Revenue
+    type: rolling_window
+    aggregate: sum
+    column: amount
+    window: "7 days"
+    order_by_column: order_date
+    filter: status = 'paid'
+    unit: USD
+    description: Rolling sum of paid order amounts over the trailing 7 days.
+
+roles:
+  - id: analyst_west
+    display_name: West Region Analyst
+    attributes:
+      region: west
+  - id: external_partner
+    display_name: External Partner
+    attributes: {}
+
+policies:
+  - id: analyst_west_orders
+    role: analyst_west
+    source: orders
+    default_column_mode: allow
+    row_filter:
+      op: eq
+      column: region
+      value:
+        $attr: region
+  - id: external_partner_orders
+    role: external_partner
+    source: orders
+    default_column_mode: deny
+    column_overrides:
+      order_id: allow
+      amount: allow
+      order_date: allow
+    row_filter:
+      op: eq
+      column: region
+      value: west
+
+quality_rules:
+  - id: orders_amount_not_null
+    source: orders
+    type: not_null
+    config:
+      column: amount
+    severity: block
+  - id: orders_amount_range
+    source: orders
+    type: range
+    config:
+      column: amount
+      min: 0
+      max: 1000000
+    severity: warn
+
+freshness_rules:
+  - id: orders_freshness_24h
+    source: orders
+    watermark_column: order_date
+    max_age_seconds: 86400
+    severity: block
