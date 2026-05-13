@@ -68,9 +68,11 @@ def run_dsl_query(
             stage="parsed", reason=f"unknown_source: {e}",
         )
 
-    # Semantic validation against AllowedSchema
+    # Semantic validation against AllowedSchema. Pass `con` so primitive-
+    # specific checks (e.g. period_over_period's period_dim requirement)
+    # can read metric_config from the catalog.
     try:
-        validate_intent(intent, schema)
+        validate_intent(intent, schema, con=con)
     except IntentValidationError as e:
         return _pre_compile_failure(
             con, identity, intent_json, started_ns,

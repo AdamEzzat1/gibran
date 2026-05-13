@@ -149,20 +149,26 @@ def _upsert_metric(con: duckdb.DuckDBPyConnection, m: MetricConfig) -> None:
 
 def _ensure_metric_version(con: duckdb.DuckDBPyConnection, m: MetricConfig) -> None:
     expression = _render_expression(m)
+    metric_config_json = _render_metric_config(m)
     existing = con.execute(
-        "SELECT version, expression, filter_sql FROM rumi_metric_versions "
+        "SELECT version, expression, filter_sql, metric_config "
+        "FROM rumi_metric_versions "
         "WHERE metric_id = ? AND effective_to IS NULL",
         [m.id],
     ).fetchone()
     if existing is None:
         con.execute(
             "INSERT INTO rumi_metric_versions "
-            "(metric_id, version, expression, filter_sql) "
-            "VALUES (?, 1, ?, ?)",
-            [m.id, expression, m.filter],
+            "(metric_id, version, expression, filter_sql, metric_config) "
+            "VALUES (?, 1, ?, ?, ?)",
+            [m.id, expression, m.filter, metric_config_json],
         )
         return
-    if existing[1] == expression and existing[2] == m.filter:
+    if (
+        existing[1] == expression
+        and existing[2] == m.filter
+        and existing[3] == metric_config_json
+    ):
         return
     new_version = existing[0] + 1
     con.execute(
@@ -172,14 +178,27 @@ def _ensure_metric_version(con: duckdb.DuckDBPyConnection, m: MetricConfig) -> N
     )
     con.execute(
         "INSERT INTO rumi_metric_versions "
-        "(metric_id, version, expression, filter_sql) "
-        "VALUES (?, ?, ?, ?)",
-        [m.id, new_version, expression, m.filter],
+        "(metric_id, version, expression, filter_sql, metric_config) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [m.id, new_version, expression, m.filter, metric_config_json],
     )
     con.execute(
         "UPDATE rumi_metrics SET current_version = ? WHERE metric_id = ?",
         [new_version, m.id],
     )
+
+
+def _render_metric_config(m: MetricConfig) -> str | None:
+    """Pack primitive-specific config into a JSON blob, or None for shapes
+    that need no extra config beyond `expression`."""
+    if m.type == "period_over_period":
+        return json.dumps({
+            "base_metric": m.base_metric,
+            "period_dim": m.period_dim,
+            "period_unit": m.period_unit,
+            "comparison": m.comparison,
+        })
+    return None
 
 
 def _render_expression(m: MetricConfig) -> str:
@@ -195,6 +214,12 @@ def _render_expression(m: MetricConfig) -> str:
         # FILTER + GROUP BY just like SUM/AVG/etc.
         assert m.column is not None and m.p is not None
         return f"QUANTILE_CONT({m.column}, {m.p})"
+    if m.type == "period_over_period":
+        # The actual SQL is dynamic (it composes the base metric's
+        # expression and the period_dim's column at compile time) so we
+        # store a marker; the compiler reads metric_config and ignores
+        # this string.
+        return f"period_over_period[{m.base_metric}@{m.period_unit}/{m.comparison}]"
     if m.type == "rolling_window":
         # SQL grammar for window-aggregate-with-filter requires:
         #   aggregate(args) [FILTER (WHERE cond)] OVER (window_spec)

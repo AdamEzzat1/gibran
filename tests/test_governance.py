@@ -48,7 +48,7 @@ class TestPreviewSchema:
         }
         assert {m.metric_id for m in schema.metrics} == {
             "order_count", "gross_revenue", "avg_order_value", "revenue_per_paid_order",
-            "p95_amount", "revenue_7d_rolling",
+            "p95_amount", "revenue_7d_rolling", "revenue_mom",
         }
 
     def test_external_partner_sees_only_granted_columns_default_deny(self) -> None:

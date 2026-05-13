@@ -11,11 +11,19 @@ missing field, extra field, out-of-range limit). This module catches
   - every order_by key references something in the intent's projection
   - time grain only on temporal dimensions
   - filter AST nodes use only the whitelisted operators AND no $attr refs
+  - period_over_period metrics: the intent.dimensions must include the
+    period_dim at the matching grain (the LAG window function references
+    that grouping expression)
 
 Validation runs BEFORE compilation. If this passes, compilation cannot
 fail for "missing reference" reasons -- only for internal-invariant
 violations (which would be bugs)."""
 from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+
+import duckdb
 
 from rumi.dsl.types import QueryIntent
 from rumi.governance.ast import ASTValidationError, validate_intent_ast
@@ -26,10 +34,20 @@ class IntentValidationError(ValueError):
     pass
 
 
-def validate_intent(intent: QueryIntent, schema: AllowedSchema) -> None:
+def validate_intent(
+    intent: QueryIntent,
+    schema: AllowedSchema,
+    con: "duckdb.DuckDBPyConnection | None" = None,
+) -> None:
     """Raise IntentValidationError if intent references something not in schema,
     if a time grain is applied to a non-temporal dimension, or if filter ASTs
-    are malformed."""
+    are malformed.
+
+    `con` is optional and used only for primitive-specific checks that
+    need to read the catalog (e.g. period_over_period needs the metric's
+    `metric_config` JSON to know which period_dim must appear in the
+    intent). When `con` is None those checks are skipped -- callers that
+    care about them MUST pass a connection."""
     if intent.source != schema.source_id:
         raise IntentValidationError(
             f"intent.source {intent.source!r} != AllowedSchema.source {schema.source_id!r}"
@@ -99,3 +117,42 @@ def validate_intent(intent: QueryIntent, schema: AllowedSchema) -> None:
             f"is row-level and doesn't aggregate into groups. Remove dimensions "
             f"or use a non-rolling metric."
         )
+
+    # period_over_period metrics: their LAG window references DATE_TRUNC over
+    # the metric's configured period_dim; the intent's dimension list must
+    # therefore include that period_dim with a matching grain. Without this
+    # check, the compiled SQL would emit a LAG ordered by a column that
+    # isn't in the GROUP BY, producing nondeterministic / wrong results.
+    pop_metrics = [
+        m for m in schema.metrics
+        if m.metric_id in intent_metric_set and m.metric_type == "period_over_period"
+    ]
+    if pop_metrics and con is not None:
+        intent_dim_grain = {d.id: d.grain for d in intent.dimensions}
+        for m in pop_metrics:
+            cfg_row = con.execute(
+                "SELECT metric_config FROM rumi_metric_versions "
+                "WHERE metric_id = ? AND effective_to IS NULL",
+                [m.metric_id],
+            ).fetchone()
+            if cfg_row is None or cfg_row[0] is None:
+                raise IntentValidationError(
+                    f"period_over_period metric {m.metric_id!r}: no "
+                    f"metric_config in catalog (run `rumi sync`)"
+                )
+            cfg = json.loads(cfg_row[0])
+            period_dim = cfg["period_dim"]
+            period_unit = cfg["period_unit"]
+            if period_dim not in intent_dim_grain:
+                raise IntentValidationError(
+                    f"period_over_period metric {m.metric_id!r} requires "
+                    f"intent.dimensions to include {period_dim!r} (the "
+                    f"period dimension); current intent dimensions: "
+                    f"{[d.id for d in intent.dimensions]}"
+                )
+            if intent_dim_grain[period_dim] != period_unit:
+                raise IntentValidationError(
+                    f"period_over_period metric {m.metric_id!r} requires "
+                    f"dimension {period_dim!r} at grain {period_unit!r}, "
+                    f"got grain {intent_dim_grain[period_dim]!r}"
+                )

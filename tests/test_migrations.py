@@ -11,7 +11,20 @@ MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 def test_migrations_apply_clean() -> None:
     con = duckdb.connect(":memory:")
     applied = apply_all(con, MIGRATIONS_DIR)
-    assert applied == [1, 2, 3, 4, 5]
+    assert applied == [1, 2, 3, 4, 5, 6]
+
+
+def test_metric_config_column_exists() -> None:
+    con = duckdb.connect(":memory:")
+    apply_all(con, MIGRATIONS_DIR)
+    cols = {
+        r[0]
+        for r in con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'rumi_metric_versions'"
+        ).fetchall()
+    }
+    assert "metric_config" in cols
 
 
 def test_source_health_table_exists() -> None:

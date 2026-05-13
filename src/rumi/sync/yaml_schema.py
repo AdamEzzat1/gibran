@@ -45,11 +45,14 @@ class SourceConfig(_Strict):
 MetricType = Literal[
     "count", "sum", "avg", "min", "max", "ratio", "expression",
     "percentile", "rolling_window",
-    # period_over_period, cohort_retention, funnel: deferred (require multi-stage
-    # SQL / metric composition / CTE infrastructure)
+    "period_over_period",
+    # cohort_retention, funnel: deferred (require multi-stage SQL / CTE
+    # infrastructure)
 ]
 
 RollingAggregate = Literal["sum", "avg", "min", "max", "count"]
+PeriodUnit = Literal["year", "quarter", "month", "week", "day"]
+PeriodComparison = Literal["delta", "ratio", "pct_change"]
 
 
 class MetricConfig(_Strict):
@@ -74,6 +77,12 @@ class MetricConfig(_Strict):
     window: str | None = None             # DuckDB INTERVAL string, e.g. "28 days"
     order_by_column: str | None = None
     partition_by: list[str] | None = None
+
+    # period_over_period-specific
+    base_metric: str | None = None
+    period_dim: str | None = None
+    period_unit: PeriodUnit | None = None
+    comparison: PeriodComparison | None = None
 
     @model_validator(mode="after")
     def _check_shape(self) -> "MetricConfig":
@@ -125,6 +134,20 @@ class MetricConfig(_Strict):
             if self.expression or self.numerator or self.denominator:
                 raise ValueError(
                     f"metric {self.id!r}: rolling_window cannot have expression/numerator/denominator"
+                )
+        elif self.type == "period_over_period":
+            missing = [
+                f for f in ("base_metric", "period_dim", "period_unit", "comparison")
+                if getattr(self, f) is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"metric {self.id!r}: period_over_period requires {missing}"
+                )
+            if self.expression or self.numerator or self.denominator:
+                raise ValueError(
+                    f"metric {self.id!r}: period_over_period cannot have "
+                    f"expression/numerator/denominator (use base_metric instead)"
                 )
         else:  # sum, avg, min, max
             if not self.expression:

@@ -81,6 +81,16 @@ metrics:
     filter: status = 'paid'
     unit: USD
     description: Rolling sum of paid order amounts over the trailing 7 days.
+  - id: revenue_mom
+    source: orders
+    display_name: Revenue Month-over-Month
+    type: period_over_period
+    base_metric: gross_revenue
+    period_dim: orders.order_date
+    period_unit: month
+    comparison: delta
+    unit: USD
+    description: Change in gross revenue compared to the prior month.
 
 roles:
   - id: analyst_west

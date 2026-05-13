@@ -46,6 +46,8 @@ class _MetricMeta:
     metric_type: str
     expression: str
     filter_sql: str | None
+    metric_config: dict | None  # JSON blob from rumi_metric_versions; None for
+                                # primitives that don't need extra config
 
 
 @dataclass(frozen=True)
@@ -71,7 +73,7 @@ class Catalog:
 
     def get_metric(self, metric_id: str) -> _MetricMeta:
         row = self.con.execute(
-            "SELECT m.metric_type, mv.expression, mv.filter_sql "
+            "SELECT m.metric_type, mv.expression, mv.filter_sql, mv.metric_config "
             "FROM rumi_metrics m "
             "JOIN rumi_metric_versions mv "
             "  ON mv.metric_id = m.metric_id AND mv.effective_to IS NULL "
@@ -80,9 +82,15 @@ class Catalog:
         ).fetchone()
         if row is None:
             raise CompileError(f"unknown metric: {metric_id!r}")
+        metric_config = None
+        if row[3] is not None:
+            import json as _json
+
+            metric_config = _json.loads(row[3])
         return _MetricMeta(
             metric_id=metric_id, metric_type=row[0],
             expression=row[1], filter_sql=row[2],
+            metric_config=metric_config,
         )
 
     def get_dimension(self, dimension_id: str) -> _DimensionMeta:
@@ -220,6 +228,13 @@ def _render_metric_expression(
         # clause in the correct grammatical position (before OVER). Return as-is
         # -- DO NOT attach another FILTER below.
         return meta.expression
+    elif meta.metric_type == "period_over_period":
+        if meta.filter_sql:
+            raise CompileError(
+                f"period_over_period metric {meta.metric_id!r}: filter_sql "
+                f"is not supported (apply filters on the base_metric instead)"
+            )
+        return _render_period_over_period(meta, catalog, seen)
     elif meta.metric_type == "ratio":
         if meta.filter_sql:
             raise CompileError(
@@ -241,6 +256,72 @@ def _render_metric_expression(
     if meta.filter_sql:
         return f"{base} FILTER (WHERE {meta.filter_sql})"
     return base
+
+
+_PERIOD_TO_TRUNC = {
+    "year": "year", "quarter": "quarter", "month": "month",
+    "week": "week", "day": "day",
+}
+
+
+def _render_period_over_period(
+    meta: _MetricMeta, catalog: Catalog, seen: frozenset[str]
+) -> str:
+    """Render a period_over_period metric.
+
+    Composes:
+      - the base metric's fully-rendered SQL expression (parallel to ratio)
+      - LAG() over DATE_TRUNC(period_unit, "period_dim_column")
+
+    Emits one of (depending on comparison):
+      delta:      (BASE) - LAG((BASE)) OVER (ORDER BY DATE_TRUNC('PERIOD', "col"))
+      ratio:      (BASE) / NULLIF(LAG((BASE)) OVER (...), 0)
+      pct_change: ((BASE) - LAG((BASE)) OVER (...)) / NULLIF(LAG((BASE)) OVER (...), 0)
+    """
+    cfg = meta.metric_config
+    if not cfg:
+        raise CompileError(
+            f"period_over_period metric {meta.metric_id!r} is missing "
+            f"metric_config (was the sync re-run after migration 0006?)"
+        )
+
+    base_id = cfg["base_metric"]
+    period_dim_id = cfg["period_dim"]
+    period_unit = cfg["period_unit"]
+    comparison = cfg["comparison"]
+
+    try:
+        base_meta = catalog.get_metric(base_id)
+    except CompileError as e:
+        raise CompileError(
+            f"period_over_period metric {meta.metric_id!r}: "
+            f"base_metric {base_id!r} not found ({e})"
+        ) from e
+    try:
+        period_dim_meta = catalog.get_dimension(period_dim_id)
+    except CompileError as e:
+        raise CompileError(
+            f"period_over_period metric {meta.metric_id!r}: "
+            f"period_dim {period_dim_id!r} not found ({e})"
+        ) from e
+
+    base_sql = _render_metric_expression(base_meta, catalog, seen)
+    trunc = _PERIOD_TO_TRUNC[period_unit]
+    period_col = qident(period_dim_meta.column_name)
+    over_clause = f"OVER (ORDER BY DATE_TRUNC('{trunc}', {period_col}))"
+    base_expr = f"({base_sql})"
+    lag_expr = f"LAG({base_expr}) {over_clause}"
+
+    if comparison == "delta":
+        return f"{base_expr} - {lag_expr}"
+    if comparison == "ratio":
+        return f"{base_expr} / NULLIF({lag_expr}, 0)"
+    if comparison == "pct_change":
+        return f"({base_expr} - {lag_expr}) / NULLIF({lag_expr}, 0)"
+    raise CompileError(
+        f"period_over_period metric {meta.metric_id!r}: "
+        f"unknown comparison {comparison!r}"
+    )
 
 
 def _render_ratio(

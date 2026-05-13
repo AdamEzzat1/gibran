@@ -34,12 +34,17 @@ def test_loads_valid_yaml() -> None:
         "revenue_per_paid_order",
         "p95_amount",
         "revenue_7d_rolling",
+        "revenue_mom",
     }
     assert validated.metric_dependencies["avg_order_value"] == frozenset(
         {"order_count", "gross_revenue"}
     )
     assert validated.metric_dependencies["order_count"] == frozenset()
     assert validated.metric_dependencies["gross_revenue"] == frozenset()
+    # period_over_period declares its base_metric as a dependency.
+    assert validated.metric_dependencies["revenue_mom"] == frozenset(
+        {"gross_revenue"}
+    )
     assert {r.id for r in validated.config.roles} == {"analyst_west", "external_partner"}
     assert {p.id for p in validated.config.policies} == {
         "analyst_west_orders",
@@ -58,7 +63,7 @@ def test_apply_populates_catalog_and_governance() -> None:
     counts = apply_config(con, validated)
 
     assert counts == {
-        "sources": 1, "columns": 6, "dimensions": 2, "metrics": 6,
+        "sources": 1, "columns": 6, "dimensions": 2, "metrics": 7,
         "roles": 2, "policies": 2, "quality_rules": 2, "freshness_rules": 1,
     }
 
@@ -67,7 +72,8 @@ def test_apply_populates_catalog_and_governance() -> None:
         r[0] for r in con.execute("SELECT metric_id FROM rumi_metrics").fetchall()
     ) == [
         "avg_order_value", "gross_revenue", "order_count",
-        "p95_amount", "revenue_7d_rolling", "revenue_per_paid_order",
+        "p95_amount", "revenue_7d_rolling", "revenue_mom",
+        "revenue_per_paid_order",
     ]
 
     deps = {
@@ -79,6 +85,7 @@ def test_apply_populates_catalog_and_governance() -> None:
     assert deps == {
         ("avg_order_value", "order_count"),
         ("avg_order_value", "gross_revenue"),
+        ("revenue_mom", "gross_revenue"),
     }
 
     versions = {
@@ -104,11 +111,13 @@ def test_apply_idempotent() -> None:
     validated = load_config(FIXTURES / "rumi.yaml")
     apply_config(con, validated)
     apply_config(con, validated)
-    assert con.execute("SELECT COUNT(*) FROM rumi_metric_versions").fetchone()[0] == 6
-    assert con.execute("SELECT COUNT(*) FROM rumi_metrics").fetchone()[0] == 6
-    # avg_order_value (ratio) declares 2 deps; revenue_per_paid_order (expression) deps
-    # are not tracked in V1 (loader only extracts deps for ratio metrics).
-    assert con.execute("SELECT COUNT(*) FROM rumi_metric_dependencies").fetchone()[0] == 2
+    assert con.execute("SELECT COUNT(*) FROM rumi_metric_versions").fetchone()[0] == 7
+    assert con.execute("SELECT COUNT(*) FROM rumi_metrics").fetchone()[0] == 7
+    # avg_order_value (ratio) declares 2 deps; revenue_mom (period_over_period)
+    # declares 1 dep on its base_metric (gross_revenue); revenue_per_paid_order
+    # (expression) deps are not tracked in V1 (loader only extracts deps for
+    # ratio and period_over_period metrics).
+    assert con.execute("SELECT COUNT(*) FROM rumi_metric_dependencies").fetchone()[0] == 3
     assert con.execute("SELECT COUNT(*) FROM rumi_roles").fetchone()[0] == 2
     assert con.execute("SELECT COUNT(*) FROM rumi_role_attributes").fetchone()[0] == 1
     assert con.execute("SELECT COUNT(*) FROM rumi_policies").fetchone()[0] == 2

@@ -541,7 +541,7 @@ def explain(
             raise typer.Exit(code=3)
 
         try:
-            validate_intent(intent, schema)
+            validate_intent(intent, schema, con=con)
         except IntentValidationError as e:
             typer.echo(f"ERROR: intent_invalid: {e}", err=True)
             raise typer.Exit(code=3)

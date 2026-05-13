@@ -80,6 +80,13 @@ def _validate_cross_entity(cfg: RumiConfig) -> dict[str, frozenset[str]]:
                 )
 
     metric_by_id = {m.id: m for m in cfg.metrics}
+    # Build a lookup of (source_id -> {dimension_id -> DimensionConfig}) so
+    # period_over_period can verify its `period_dim` exists on the same
+    # source and is temporal.
+    dims_by_source: dict[str, dict[str, "object"]] = {}
+    for s in cfg.sources:
+        dims_by_source[s.id] = {d.id: d for d in s.dimensions}
+
     deps: dict[str, set[str]] = {m.id: set() for m in cfg.metrics}
     for m in cfg.metrics:
         if m.source not in source_ids:
@@ -103,6 +110,31 @@ def _validate_cross_entity(cfg: RumiConfig) -> dict[str, frozenset[str]]:
                         f"must be same-source as {m.source!r} (cross-source deferred to V2)"
                     )
                 deps[m.id].add(ref_id)
+        elif m.type == "period_over_period":
+            assert m.base_metric is not None and m.period_dim is not None
+            if m.base_metric not in metric_by_id:
+                raise ConfigValidationError(
+                    f"metric {m.id!r}: base_metric {m.base_metric!r} not defined"
+                )
+            if metric_by_id[m.base_metric].source != m.source:
+                raise ConfigValidationError(
+                    f"metric {m.id!r}: base_metric {m.base_metric!r} is from "
+                    f"source {metric_by_id[m.base_metric].source!r}; "
+                    f"period_over_period must be same-source as {m.source!r}"
+                )
+            src_dims = dims_by_source.get(m.source, {})
+            period_dim = src_dims.get(m.period_dim)
+            if period_dim is None:
+                raise ConfigValidationError(
+                    f"metric {m.id!r}: period_dim {m.period_dim!r} not defined "
+                    f"on source {m.source!r}"
+                )
+            if getattr(period_dim, "type", None) != "temporal":
+                raise ConfigValidationError(
+                    f"metric {m.id!r}: period_dim {m.period_dim!r} must be a "
+                    f"temporal dimension (got {getattr(period_dim, 'type', None)!r})"
+                )
+            deps[m.id].add(m.base_metric)
     _detect_cycles(deps)
 
     for p in cfg.policies:
