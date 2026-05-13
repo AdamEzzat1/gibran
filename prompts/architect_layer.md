@@ -26,12 +26,17 @@ FIXED CONSTRAINTS (do not re-derive, treat as given):
 - Sensitivity: configurable rumi_sensitivity_levels table.
   Auto-inferred columns get 'unclassified', not 'public'.
 - Operator whitelist for row_filter_ast: see rumi/governance/types.py.
-- Conversational front-end: NONE in V1. No LLM, no classical NLP, no
-  pattern matching. Users type the Rumi DSL directly (JSON intent) -- same
-  model as Cube's CubeQL API or MetricFlow's `mf query`. The DSL IS the
-  user surface, not an intermediate. NL/DSL bridges (rule-based, embeddings,
-  or LLM) are deferred indefinitely; the DSL design is forward-compatible
-  with adding them later as a thin layer above the DSL.
+- Conversational front-end: NONE in V1. The DSL is the user surface.
+  WHEN/IF an NL layer is later added, the constraint is: NO LLM in the
+  emission path. Classical NLP (pattern templates, slot-filling with
+  spaCy/regex), or embedding retrieval with local sentence-transformers
+  are acceptable. The rule is "no hallucination", not "no ML": any
+  approach that can FAIL to parse a question but CANNOT invent metrics
+  or columns is in-scope. LLM emission (even with constrained decoding)
+  can fabricate AllowedSchema references and is therefore out-of-scope.
+  Same product model as Cube's CubeQL / MetricFlow's `mf query`: the
+  query language is the user surface; NL is a thin convenience layer
+  above it, not a replacement.
 - Advanced SQL techniques (window functions, period-over-period, cohort
   retention, funnels, percentiles) live as metric type primitives compiled
   by the engine -- not as user-authored SQL fragments.

@@ -69,95 +69,188 @@ See `STATUS.md` for the per-layer breakdown and the deferred-with-rationale list
 
 ## 4. Additional functionality opportunities — Stack Role Group
 
-Asked each role to nominate one or two pieces of functionality that
-would extend what Rumi can already do, scoped to what's plausibly
-useful in the next few iterations.
+Each role's full roadmap of "still has potential" items, drawn from the
+grading panel. Items are sized roughly (S/M/L) and ordered by user-visible
+value within each role.
 
-### Database Systems Architect
+### Database Systems Architect — current grade B
 
-- **Compiled-DSL plan cache.** Right now every `rumi query --dsl '{...}'`
-  invocation re-parses Pydantic, re-validates against AllowedSchema,
-  re-compiles to SQL, and re-feeds to sqlglot for governance column
-  extraction. For a dashboard firing the same intent every 30 seconds,
-  that's 100% redundant work. A cache keyed by `hash(intent_json, role_id,
-  policy_schema_version)` → compiled SQL string would cut the hot path
-  meaningfully. ~80 lines + tests.
-- **Source-type dispatch in the runner.** `rumi check` currently assumes
-  `source_id` is the DuckDB relation name. For real Parquet/CSV sources,
-  users have to manually `CREATE VIEW orders AS SELECT * FROM 'path.parquet'`.
-  A dispatcher in `observability/runner.py` that reads `rumi_sources.source_type`
-  and constructs the right FROM clause (e.g., `read_parquet('uri')`) would
-  remove the manual step. Real adoption blocker. ~50 lines.
+- **Source-type dispatch in the runner** (S). `rumi check` and the DSL
+  compiler currently assume `source_id` is the DuckDB relation name. For
+  real Parquet/CSV sources, users have to manually `CREATE VIEW orders
+  AS SELECT * FROM 'path.parquet'`. A dispatcher in a shared helper that
+  reads `rumi_sources.source_type` and constructs the right FROM clause
+  (e.g., `read_parquet('uri')` for parquet) would remove the manual step.
+  Real adoption blocker. ~50 lines.
+- **Compiled-DSL plan cache** (M). Every `rumi query --dsl '{...}'` re-parses
+  Pydantic, re-validates against AllowedSchema, re-compiles to SQL, re-feeds
+  to sqlglot for governance column extraction. A cache keyed by
+  `hash(intent_json, role_id, policy_schema_version)` → compiled SQL would
+  cut the hot path. ~80 lines.
+- **Query-plan introspection** (S). Expose DuckDB's EXPLAIN through
+  `rumi query --explain` or `rumi explain --dsl '{...}'`. Closes a real
+  visibility gap.
 
-### Analytics Engineer
+To move to A: ship source-type dispatch and introspection.
 
-- **Discrete aggregate primitives**: `weighted_avg`, `stddev_samp`, `stddev_pop`,
-  `count_distinct`, `count_distinct_approx`. All compile as a single
-  function call (`<FUNC>(args)`) — same shape as the existing `sum/avg/min/max`.
-  ~30 lines of code for the lot. Materially expands what analysts can
-  express without writing `expression`-type metrics.
-- **Reusable filter sets.** Right now `status = 'paid'` appears in
-  `gross_revenue.filter`, would also appear in `avg_paid_order_value.filter`,
-  and so on. A `filter_sets` YAML section that defines `{name, sql}` (or
-  `{name, ast}`) and lets metrics reference by name would deduplicate.
+### Analytics Engineer — current grade B
 
-### Data Quality Engineer
+- **`period_over_period` metric primitive** (M). MoM/QoQ/YoY are the most-asked
+  analytics in this entire space. Composes a base metric + LAG over a
+  time dimension. Spec in §3.1.
+- **Discrete aggregate primitives** (S). `weighted_avg`, `stddev_samp`,
+  `stddev_pop`, `count_distinct`, `count_distinct_approx`, `mode`, `top_k`.
+  All compile as a single function call — same shape as existing
+  `sum/avg/min/max`. One-line each in the applier. ~30 lines for the lot.
+- **CTE compiler infrastructure** (M-L). Standalone refactor; prerequisite
+  for cohort + funnel. Compiler learns to emit `WITH a AS (...), b AS (...)
+  SELECT ...` shape. Spec in §3.2.
+- **`cohort_retention` metric primitive** (M, after CTE infra). Flagship
+  analytical pattern. CTE chain: cohort assignment → period join →
+  aggregate.
+- **`funnel` metric primitive** (M, after CTE infra). Sequential step
+  matching. Same CTE infrastructure.
+- **Dimension hierarchies** (M). Country > state > city is a standard
+  analytical pattern. `parent_dimension: orders.country` on a dimension
+  declaration would let the compiler emit drill-down queries.
+- **Reusable filter sets** (S). Right now `status = 'paid'` appears
+  verbatim in every paid-revenue metric. A `filter_sets` YAML section
+  that defines `{name, ast}` and lets metrics reference by name would
+  deduplicate.
+- **Time grain at intent level** (S). Currently grain is only on dimensions.
+  An intent-level `time_grain: month` would auto-apply to any temporal
+  dimension in the projection.
 
-- **Anomaly detection rules.** A new quality `rule_type='anomaly'` that
-  flags a metric value > N standard deviations from its trailing
-  K-period mean. Reuses metric_versions + query_log infrastructure
-  (the rule executes its own DSL query, compares to historical results,
-  records pass/fail). Lands as a 6th `quality_rules.rule_type`.
-- **Schema-drift detection in `rumi sync`.** When sync notices that a
-  source's actual DuckDB schema diverges from `rumi_columns` (e.g., a
-  column was dropped, a type changed, a new column appeared), surface
-  a warning *before* applying YAML. Currently sync trusts the YAML.
+To move to A: ship period_over_period, then CTE infrastructure, then
+cohort + funnel. Add the missing aggregate primitives.
 
-### Security / Governance Architect
+### Data Quality / Observability Engineer — current grade B+
 
-- **Time-bound policies.** Add `valid_until TIMESTAMP` to `rumi_policies`;
-  `governance.evaluate` checks this before allowing. Critical for
-  contractor / consultant / time-limited access patterns. ~20 lines of
-  governance + a migration.
-- **Audit-log redaction of SQL literals.** `rumi_query_log.generated_sql`
-  currently includes literal values from policy row filters
-  (e.g., `region = 'west'`). For high-sensitivity attributes
-  (e.g., a literal email or SSN), this *re-leaks* the value via the audit
-  log itself. A redactor that rewrites literals for `sensitivity=pii`
-  columns before persisting would prevent the side channel.
+- **Anomaly-detection rule type** (M). New `quality_rules.rule_type='anomaly'`:
+  flag a metric value > N standard deviations from its trailing K-period
+  mean. Reuses `rumi_query_log` history. Lands as a 6th rule_type.
+  Table-stakes for modern data products.
+- **`rumi check` scheduler** (M). Today it's manual or cron. An in-product
+  scheduler — either a `rumi check --watch` mode or a separate `rumi
+  scheduler` daemon — would close the loop without external infrastructure.
+- **Alerting integration** (M). Webhooks / Slack / PagerDuty when a
+  `severity='block'` rule fails or a source flips to status='block'.
+  At minimum, a webhook POST with the BlockingFailure JSON.
+- **Rule dependencies** (S). "Freshness must pass before quality runs"
+  can't be expressed. A `depends_on: [rule_id, ...]` field on
+  `rumi_quality_rules` + dependency-aware ordering in `run_checks`.
+- **Schema-drift detection in `rumi sync`** (S, high-leverage). When sync
+  notices that a source's actual DuckDB schema diverges from `rumi_columns`
+  (column dropped, type changed, new column appeared), surface a warning
+  before applying YAML.
+- **Custom_sql rule template library** (S). Pre-baked templates for
+  "uniqueness within group," "referential integrity," "value distribution
+  matches expected." Users reference by name; sync expands.
 
-### Performance Engineer
+To move to A: anomaly rule type + scheduler + at least one alerting
+integration. The schema-drift detector is a small addition that punches
+above its weight.
 
-- **DSL result caching.** Same intent + same identity + same source-health
-  generation → return cached rows without re-executing. TTL or invalidation
-  on `rumi check` of any source the intent touches. Reduces dashboard
-  load on the underlying DuckDB queries.
-- **Materialized metrics.** A `materialized: true` flag on a metric
-  definition; `rumi sync` creates a DuckDB materialized view that
-  pre-aggregates by the metric's most common dimensions. Queries against
-  the metric route to the view. Big speedup for frequently-asked metrics.
+### Security / Governance Architect — current grade B+
 
-### Product Manager
+- **Time-bound policies** (S). `valid_until TIMESTAMP` column on
+  `rumi_policies`; `governance.evaluate` checks before allowing.
+  Contractor / consultant / temporary access. ~20 lines + migration.
+- **Audit-log SQL redaction** (S). `rumi_query_log.generated_sql` includes
+  literal values from filters (e.g., `email = 'alice@x.com'`). For
+  `sensitivity in (pii, restricted)` columns, the literal value
+  re-leaks via the audit log itself. A redactor that rewrites literals
+  before persisting closes the side channel.
+- **Approval workflow** (M). High-sensitivity policy changes (e.g., any
+  change touching a `restricted` column) require sign-off. Could be
+  enforced via a `rumi sync --require-approval` mode that writes pending
+  changes to a separate table awaiting approval.
+- **Access-pattern anomaly detection** (M). "User X just queried 100x
+  their typical daily volume" → alert. Reuses `rumi_query_log`.
+- **Multi-tenancy primitives** (L). `tenant_id` column on every governance
+  table; tenant-scoped queries; isolation guarantees. Real architectural
+  pass — likely V2.
+- **Break-glass / emergency-access pattern** (M). A special role with
+  elevated access, every use of which produces a high-priority audit row
+  + alert. Industry-standard for compliance-regulated deployments.
 
-- **`rumi describe <source>` and `rumi catalog`.** Let users (especially
-  new ones) see what they have access to without writing a query. Output:
-  source(s) the role can see, columns (with sensitivity), dimensions,
-  metrics, the row filter that gets applied to them. This is the
-  *exploration* step in any analytics workflow; without it, new users
-  are flying blind. Probably the highest user-visible-value item on the
-  list. ~150 lines + tests.
-- **Result export formats.** `rumi query --output csv` / `--output json` /
-  `--output parquet`. Right now output is tab-separated to stdout —
-  fine for `grep`, useless for spreadsheets and notebooks. Every analyst
-  pipes results somewhere; without export, Rumi feels like a toy.
+To move to A: time-bound policies + audit-log redaction. Both are small
+additions with outsized security value.
 
-### ML/NLP Engineer (mostly idle in V1, but worth a seat)
+### ML/NLP Engineer — current grade C+
 
-- **`rumi explain --dsl '{...}'`.** Given an intent, return what data it
-  accesses, what governance applied, and what the compiled SQL is —
-  *without* executing. Useful for sandbox / preview / impact analysis
-  before commit. Lays groundwork for any future NL layer that might
-  want to show "I'm about to run this — is that what you meant?" UX.
+**NL constraint update (2026-05-13)**: an NL layer is now in-scope IF
+it's non-LLM. Classical NLP (pattern templates, slot-filling with
+spaCy/regex) or embedding retrieval with local sentence-transformers
+are acceptable. LLM-emission paths (even with constrained decoding)
+remain out of scope because they can hallucinate AllowedSchema
+references. Rule of thumb: any approach that can FAIL to parse but
+CANNOT invent is in-scope.
+
+- **`rumi explain --dsl '{...}'`** (S). Given an intent, return what
+  data it accesses, what governance applied, and what the compiled SQL
+  is — *without* executing. The smallest useful introspection. Useful
+  for sandbox / preview / impact analysis. Also the obvious first
+  building block for any NL layer to debug its emissions.
+- **Pattern-template NL layer** (M). Hand-written regex/glob patterns
+  for ~20–30 common question shapes ("show X by Y", "top K X by Y",
+  "X over time"). Match → fill DSL slots → emit. Deterministic. Limited
+  coverage but covers the most-asked questions.
+- **Embedding-retrieval NL layer** (M-L). Local sentence-transformers
+  embeds metric/dimension descriptions; user query gets embedded;
+  nearest-neighbor matches drive DSL slot-filling. Higher coverage than
+  patterns; still deterministic given fixed model + corpus.
+- **Populate `example_values`** (S). `AllowedSchema.ColumnView.example_values`
+  is wired through the contract but never populated (deferred). For
+  low-cardinality public columns, the applier should sample distinct
+  values and store them on `rumi_columns`. Required for NL prompt
+  construction and useful for `rumi describe`.
+- **Schema search via embeddings** (M). "Find metrics related to 'revenue'"
+  → embedding search over metric descriptions. Same local-model
+  infrastructure as the NL layer.
+
+To move to A: ship `rumi explain` (V1-week work), then choose one of
+the NL approaches (pattern or embedding) and build it.
+
+### Performance Engineer — current grade C+
+
+- **Benchmarks** (S). `tests/benchmarks/` directory with at least three
+  representative measurements (small / medium / large source). Until
+  these exist, all perf engineering is fiction.
+- **DSL result caching** (M). Same intent + same identity + same
+  source-health generation → cached rows. TTL or invalidation on
+  `rumi check`. Reduces dashboard load.
+- **Compiled-DSL plan cache** (M, also under DB Architect). Avoid
+  recompilation on repeated intents.
+- **Materialized metrics** (L). `materialized: true` flag → `rumi sync`
+  creates a DuckDB materialized view pre-aggregating by common dimensions.
+- **Query timeout enforcement** (S). Per-query deadline on the executor.
+
+To move to A: benchmarks first, then plan + result caching.
+
+### Product Manager — current grade B-
+
+- **Introspection bundle** (M, high user-visible value):
+  - `rumi describe <source>` — show AllowedSchema for the identity:
+    columns (with sensitivity), dimensions, metrics, the row filter
+    that gets applied to them.
+  - `rumi catalog` — list all sources the identity can see.
+  - `rumi explain --dsl '{...}'` — parse + validate + compile WITHOUT
+    executing.
+  - `rumi query --output csv|json|parquet` — result export. Without it,
+    Rumi is a CLI demo, not an analyst tool.
+- **README + quickstart** (S). A top-level `README.md` aimed at first-time
+  visitors. `rumi init --sample` that drops a runnable fixture +
+  three-line "now run these three commands" demo.
+- **One real user** (no estimate). The grade does not move past B- until
+  someone outside the dev environment uses Rumi for a real workflow.
+- **Web UI for catalog browsing** (L, V2). The `rumi catalog` data
+  surfaced via a small HTTP service + static HTML.
+- **Pricing/packaging model** (no engineering). Distribution decision:
+  open-source library? Hosted SaaS? Enterprise on-prem?
+
+To move to A: introspection bundle + README + a quickstart + at least
+one shipping user.
 
 ---
 
@@ -205,41 +298,82 @@ infra vs cohort/funnel?"**
 
 ---
 
-## 6. Synthesized priority list (post-verification)
+## 6. Synthesized priority list (post-verification, with expanded panel)
 
-### Near-term — high user value per unit of work
+The panel's full list is much larger than the original near-term tier.
+PM critic was asked to re-prioritize given the new items — three things
+changed: (a) `rumi explain` moves into the introspection bundle (small +
+high-leverage); (b) benchmarks become a prerequisite for any perf work;
+(c) NL is no longer DEFERRED — it's now CONDITIONAL (in-scope if non-LLM).
 
-1. **Source-type dispatch in the runner** (DB Architect's #2)
-2. **`rumi describe` / `rumi catalog`** (PM's #1)
-3. **Result export `--output csv|json|parquet`** (PM's #2)
+### Tier 1 — near-term, high user-visible value
 
-### Mid-term — substantive feature pass
+1. **Source-type dispatch** — closes adoption friction (`rumi check`
+   currently breaks on parquet sources unless users CREATE VIEW manually).
+2. **Introspection bundle** — `rumi describe`, `rumi catalog`,
+   `rumi explain --dsl`, `rumi query --output csv|json|parquet`. Four
+   sub-features that ship well together (they share introspection
+   plumbing). Without these, Rumi is a CLI demo, not an analyst tool.
+3. **`period_over_period` metric primitive** — MoM/QoQ/YoY are the most-asked
+   analytics in this space.
+4. **README + `rumi init --sample`** — the project doesn't have a
+   first-time-visitor entry document.
 
-4. **`period_over_period` metric primitive** (already on the roadmap)
-5. **`rumi explain --dsl '{...}'`** (ML/NLP's only proposal — small, useful)
-6. **Discrete aggregate primitives** (`weighted_avg`, `stddev`, `count_distinct`)
+### Tier 2 — substantive feature pass
 
-### Architectural — investment, unblocks the next round
+5. **Discrete aggregate primitives** — `weighted_avg`, `stddev_samp`,
+   `stddev_pop`, `count_distinct`, `count_distinct_approx`, `mode`,
+   `top_k`. ~30 lines for the lot.
+6. **Time-bound policies + audit-log SQL redaction** (Sec/Gov A-move).
+7. **Schema-drift detection in `rumi sync`** (DQ small-but-high-leverage).
+8. **Populate `example_values`** for low-cardinality public columns
+   (prerequisite for `rumi describe` to be useful + any future NL layer).
+9. **Benchmarks** — `tests/benchmarks/` with small/medium/large
+   measurements. Prerequisite for any perf work.
 
-7. **CTE compiler infrastructure**
-8. **`cohort_retention` metric primitive** (on top of CTE infra)
-9. **`funnel` metric primitive** (on top of CTE infra)
+### Tier 3 — architectural, unlocks the next round
 
-### Strategic — each its own design pass
+10. **CTE compiler infrastructure** — standalone refactor. Compiler learns
+    to emit `WITH a AS (...), b AS (...) SELECT ...`. Spec in §3.2.
+11. **`cohort_retention` metric primitive** (on top of CTE infra).
+12. **`funnel` metric primitive** (on top of CTE infra).
+13. **Dimension hierarchies + reusable filter sets + intent-level time grain**
+    (Analytics depth).
 
-10. **Time-bound policies** + **audit-log redaction** (Sec/Gov)
-11. **Anomaly detection rules** + **schema-drift detection** (DQ)
-12. **DSL result caching + plan cache + materialized metrics** (Perf,
-    once we have measured bottlenecks)
-13. **Rate limiting** (architectural; needs deployment shape decided)
-14. **Multi-process safety / server mode** (V2+; effectively a different
-    product)
+### Tier 4 — strategic, each its own design pass
 
-### Strategic — DEFERRED indefinitely per user decision
+14. **Anomaly-detection rule type + `rumi check` scheduler + alerting
+    integration** (DQ A-move).
+15. **DSL result caching + compiled-DSL plan cache + materialized metrics**
+    (Perf — after benchmarks).
+16. **Access-pattern anomaly detection + approval workflow + break-glass
+    pattern** (Sec/Gov advanced).
+17. **Rate limiting** (needs deployment shape decided).
+18. **Multi-process safety / server mode** (V2+; effectively a different
+    product).
 
-- **NL layer above the DSL** — no LLM, no classical NLP. The DSL is the
-  user surface. If revisited later, the architect prompt at
-  `prompts/architect_layer.md` already encodes the trust boundary.
+### Tier 5 — NL layer (CONDITIONAL on non-LLM approach)
+
+The user constraint changed 2026-05-13: an NL layer is in-scope IF it's
+NOT LLM-based. Hallucination is the disqualifier, not ML.
+
+19. **Pattern-template NL layer** — regex/glob patterns for ~20–30 common
+    question shapes. Deterministic; narrow coverage but covers the most-
+    asked questions. Tier-5 because it lands AFTER the DSL surface is
+    polished (introspection, exports, etc.) — there's no point putting NL
+    in front of a tool whose DSL surface itself isn't great.
+20. **Embedding-retrieval NL layer** — local sentence-transformers
+    (no API calls). Embed metric/dimension descriptions; match user
+    query; drive DSL slot-filling. Higher coverage than patterns;
+    still deterministic given fixed model + corpus.
+21. **Schema search via embeddings** — "find metrics related to X"
+    uses the same local-model infrastructure.
+
+### Permanently out of scope (per user decision)
+
+- **LLM-based NL emission** — even with constrained decoding. Reason:
+  LLMs can hallucinate references. The DSL is the contract; what sits
+  above the DSL must respect the same "no fabrication" rule.
 
 ---
 
@@ -380,36 +514,53 @@ answers when the system grows past single-user single-process usage.
 
 ---
 
-## 9. Verification loop on this handoff itself
+## 9. Verification loop — PM critic challenges the expanded list
 
-To pressure-test the priority list, I asked PM-as-critic to read it
-once more and flag what's missing or wrong. Two adjustments came back:
+After the panel produced its full roadmap (~30 items across 7 roles),
+PM read it and pushed back on three things.
 
-**"#3 result export is below `rumi describe` but feels equally critical.
-Why is one near-term-1 and the other near-term-3?"**
+**Challenge 1: "The expanded list has 30+ items. What's missing if I
+just do Tier 1?"**
 
-Fair. They're peers. Both can be done in the same iteration (~1 turn each,
-or together in a single turn since they share the introspection-output
-plumbing). Treat them as a pair.
+If you only ship Tier 1 (source-type dispatch + introspection bundle +
+period_over_period + README): you have a real product. Tiers 2–4 are
+*depth* on top of *real product*. Tier 1 is what makes the difference
+between "demo" and "tool."
 
-**"You said `rumi explain` is small + useful but listed it mid-term.
-If it's small, why isn't it near-term?"**
+**Challenge 2: "Tier 5 NL — is the constraint clear enough that someone
+won't waste two weeks building a constrained-LLM thing?"**
 
-Also fair. `rumi explain` is essentially "the runner without the execute
-step." It's ~40 lines. Move it into near-term alongside `rumi describe`
-and result export — they're all "introspection" features and ship well
-together.
+The constraint is now in three places: `prompts/architect_layer.md`
+FIXED CONSTRAINTS, `memory/rumi_constraints.md`, and §4 ML/NLP role
+above. Anyone who reads any of those finds: *no LLM in the emission
+path; classical / pattern / embedding are in-scope*. The trigger rule
+is "can this approach invent a reference that doesn't exist in
+AllowedSchema?" If yes (LLMs), out. If no (patterns, retrieval), in.
 
-**Revised near-term tier**:
+**Challenge 3: "Tier 4 anomaly detection — Sec/Gov has access-pattern
+anomaly detection AND DQ has metric-value anomaly detection. Same
+infrastructure?"**
 
-1. Source-type dispatch in `rumi check` (DB Architect's #2)
-2. **Introspection bundle**: `rumi describe`, `rumi catalog`, `rumi explain --dsl`,
-   `rumi query --output csv|json|parquet`
-3. `period_over_period` metric primitive
+Mostly. Both compute "is this observation N sigma from a trailing
+mean?" against `rumi_query_log` (access patterns) or
+`rumi_metric_versions` history (metric values). They could share a
+`rumi anomaly` runner or be implemented as two `rule_type` variants.
+Worth designing together when either is implemented.
 
-After this bundle: CTE infrastructure → cohort → funnel → strategic items.
+### Revised stop-doing list
 
-The strategic + DEFERRED items below #9 in §6 are unchanged.
+PM noted that the original handoff implied "more aggregate primitives
+should come before CTE infra." That's wrong — the *aggregate primitives*
+(stddev, count_distinct, etc.) are commodity work; analysts can use
+`expression`-type metrics today for any of them. The *real depth gap*
+is CTE-based primitives (cohort, funnel). Order Tier 2 aggregates AFTER
+Tier 3 CTE infra IF time-constrained; deliver them only as a
+"completeness pass" once cohort + funnel work.
+
+### Final tier ordering (binding)
+
+Tier 1 → Tier 2 (selectively, items 6+7+8) → Tier 3 (CTE infra → cohort
+→ funnel) → fill in Tier 2 remainder → Tier 4/5 as priorities shift.
 
 ---
 
