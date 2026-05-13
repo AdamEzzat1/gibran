@@ -39,8 +39,17 @@ def _config_path(root: Path) -> Path:
 
 
 @app.command()
-def init() -> None:
-    """Create rumi.duckdb in CWD and apply all migrations."""
+def init(
+    sample: bool = typer.Option(
+        False, "--sample",
+        help="Also drop a starter rumi.yaml and seed a sample orders table.",
+    ),
+) -> None:
+    """Create rumi.duckdb in CWD and apply all migrations.
+
+    With --sample, also writes a starter `rumi.yaml` to CWD and seeds a
+    small `orders` table so `rumi sync` + `rumi check` + `rumi query`
+    work end-to-end immediately."""
     root = _project_root()
     db = _db_path(root)
     migrations = _migrations_dir(root)
@@ -50,12 +59,140 @@ def init() -> None:
     con = duckdb.connect(str(db))
     try:
         applied = apply_migrations(con, migrations)
+        if sample:
+            _seed_sample(con, root)
     finally:
         con.close()
     if applied:
         typer.echo(f"applied migrations: {applied}")
     else:
         typer.echo("no migrations to apply (already up to date)")
+    if sample:
+        cfg = _config_path(root)
+        typer.echo(f"wrote sample config: {cfg}")
+        typer.echo("seeded sample 'orders' table (4 rows)")
+        typer.echo("")
+        typer.echo("Next steps:")
+        typer.echo("  rumi sync")
+        typer.echo("  rumi check")
+        typer.echo("  rumi describe orders --role analyst_west --attr region=west")
+        typer.echo(
+            "  rumi query --role analyst_west --attr region=west "
+            "--dsl '{\"source\":\"orders\",\"metrics\":[\"order_count\"]}'"
+        )
+
+
+_SAMPLE_YAML = """\
+# Starter rumi.yaml -- a single source ('orders') with a handful of
+# columns, two dimensions, a few metrics, two roles, and one
+# region-scoped policy. Tweak freely; re-run `rumi sync` after editing.
+
+sources:
+  - id: orders
+    display_name: Orders
+    type: duckdb_table
+    uri: orders
+    primary_grain: order_id
+    columns:
+      - name: order_id
+        type: VARCHAR
+        sensitivity: public
+      - name: amount
+        type: DECIMAL(18,2)
+        sensitivity: public
+      - name: order_date
+        type: TIMESTAMP
+        sensitivity: public
+      - name: status
+        type: VARCHAR
+        sensitivity: public
+      - name: region
+        type: VARCHAR
+        sensitivity: public
+    dimensions:
+      - id: orders.region
+        column: region
+        display_name: Region
+        type: categorical
+      - id: orders.order_date
+        column: order_date
+        display_name: Order Date
+        type: temporal
+
+metrics:
+  - id: order_count
+    source: orders
+    display_name: Order Count
+    type: count
+  - id: gross_revenue
+    source: orders
+    display_name: Gross Revenue
+    type: sum
+    expression: amount
+    filter: status = 'paid'
+    unit: USD
+
+roles:
+  - id: analyst_west
+    display_name: West Analyst
+    attributes:
+      region: west
+  - id: admin
+    display_name: Admin
+
+policies:
+  - id: analyst_west_orders
+    role: analyst_west
+    source: orders
+    default_column_mode: allow
+    row_filter:
+      op: eq
+      column: region
+      value:
+        $attr: region
+  - id: admin_orders
+    role: admin
+    source: orders
+    default_column_mode: allow
+
+quality_rules:
+  - id: orders_amount_not_null
+    source: orders
+    type: not_null
+    config:
+      column: amount
+    severity: warn
+"""
+
+
+def _seed_sample(con: duckdb.DuckDBPyConnection, root: Path) -> None:
+    """Write a starter rumi.yaml and create+populate the sample 'orders' table.
+
+    Skips writing the YAML if one already exists (don't clobber user work)."""
+    cfg = _config_path(root)
+    if not cfg.exists():
+        cfg.write_text(_SAMPLE_YAML, encoding="utf-8")
+    # The catalog migration tables exist by this point; create the actual
+    # data table that the source references. Skip if it already exists so
+    # `rumi init --sample` is idempotent.
+    exists = con.execute(
+        "SELECT COUNT(*) FROM information_schema.tables "
+        "WHERE table_name = 'orders'"
+    ).fetchone()[0]
+    if exists:
+        return
+    con.execute(
+        "CREATE TABLE orders ("
+        "order_id VARCHAR, amount DECIMAL(18,2), order_date TIMESTAMP, "
+        "status VARCHAR, region VARCHAR)"
+    )
+    con.execute(
+        "INSERT INTO orders VALUES "
+        "('o1', 100.00, now() - INTERVAL '1 hour',  'paid',    'west'), "
+        "('o2', 200.00, now() - INTERVAL '2 hours', 'paid',    'east'), "
+        "('o3',  50.00, now() - INTERVAL '3 hours', 'pending', 'west'), "
+        "('o4', 300.00, now() - INTERVAL '4 hours', 'paid',    'north')"
+    )
 
 
 @app.command()
