@@ -211,6 +211,16 @@ def query(
         None, "--dsl-file",
         help="Path to a JSON file containing the DSL query intent",
     ),
+    output: str = typer.Option(
+        "tsv", "--output",
+        help="Output format: tsv (default) / csv / json / parquet. "
+             "parquet requires --output-file.",
+    ),
+    output_file: str = typer.Option(
+        None, "--output-file",
+        help="Write results to this path instead of stdout. Required for "
+             "--output parquet; optional for csv / json.",
+    ),
 ) -> None:
     """Execute a governed query.
 
@@ -218,6 +228,12 @@ def query(
       Raw SQL:  rumi query --role <r> --attr k=v "<sql>"
       DSL:      rumi query --role <r> --attr k=v --dsl '{...}'
                 rumi query --role <r> --attr k=v --dsl-file intent.json
+
+    Output formats:
+      tsv      (default) tab-separated, headers on first line, stdout
+      csv      comma-separated with headers, stdout or --output-file
+      json     array of objects (one per row), stdout or --output-file
+      parquet  binary parquet, requires --output-file
 
     V1 dev-mode: identity comes from --user/--role/--attr (CLIResolver).
     Production paths use JWTResolver.
@@ -239,6 +255,20 @@ def query(
     if inputs_provided > 1:
         typer.echo(
             "error: provide exactly one of: positional SQL, --dsl, --dsl-file",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if output not in ("tsv", "csv", "json", "parquet"):
+        typer.echo(
+            f"error: --output must be one of tsv/csv/json/parquet, got {output!r}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if output == "parquet" and not output_file:
+        typer.echo(
+            "error: --output parquet requires --output-file (cannot write "
+            "binary to stdout)",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -296,10 +326,7 @@ def query(
         con.close()
 
     if result.status == "ok":
-        if result.columns:
-            typer.echo("\t".join(result.columns))
-        for row in result.rows or ():
-            typer.echo("\t".join(str(v) if v is not None else "" for v in row))
+        _emit_query_result(result, output, output_file)
         typer.echo(
             f"-- {len(result.rows or ())} row(s) in {result.duration_ms}ms "
             f"(query_id={result.query_id})",
@@ -318,6 +345,425 @@ def query(
             f"ERROR: {result.error_message} (query_id={result.query_id})", err=True
         )
         raise typer.Exit(code=3)
+
+
+def _emit_query_result(result, output: str, output_file: str | None) -> None:
+    """Render a successful QueryResult in the requested format.
+
+    For tsv/csv/json: write to stdout if output_file is None, else write
+    to the path. For parquet: always write to the path.
+    """
+    import csv as _csv
+    import io as _io
+    import json as _json
+
+    columns = list(result.columns or ())
+    rows = list(result.rows or ())
+
+    if output == "tsv":
+        buf = _io.StringIO()
+        if columns:
+            buf.write("\t".join(columns) + "\n")
+        for row in rows:
+            buf.write(
+                "\t".join("" if v is None else str(v) for v in row) + "\n"
+            )
+        _write_or_stdout(buf.getvalue(), output_file)
+        return
+
+    if output == "csv":
+        buf = _io.StringIO()
+        writer = _csv.writer(buf)
+        if columns:
+            writer.writerow(columns)
+        for row in rows:
+            writer.writerow(["" if v is None else v for v in row])
+        _write_or_stdout(buf.getvalue(), output_file)
+        return
+
+    if output == "json":
+        records = [
+            {col: _json_safe(v) for col, v in zip(columns, row)}
+            for row in rows
+        ]
+        payload = _json.dumps(records, indent=2, default=str)
+        _write_or_stdout(payload + "\n", output_file)
+        return
+
+    if output == "parquet":
+        # Use DuckDB to write the parquet, since we already have it nearby
+        # and the result set is already in tuples. Smallest dep surface.
+        import duckdb as _duckdb
+
+        con = _duckdb.connect(":memory:")
+        try:
+            # Build a CREATE TABLE that infers types from the first non-null
+            # value in each column. For empty result sets we fall back to
+            # VARCHAR -- a degenerate but harmless choice.
+            if not rows:
+                con.execute(
+                    "CREATE TABLE t (" +
+                    ", ".join(f'"{c}" VARCHAR' for c in columns) + ")"
+                )
+            else:
+                # Let DuckDB infer types via a VALUES expression.
+                con.execute("CREATE TABLE t AS SELECT * FROM (VALUES " + _values_clause(rows) + ") AS t(" + ", ".join(f'"{c}"' for c in columns) + ")")
+            con.execute(
+                f"COPY t TO '{output_file}' (FORMAT PARQUET)"
+            )
+        finally:
+            con.close()
+        return
+
+
+def _values_clause(rows: list[tuple]) -> str:
+    """Render rows as a SQL VALUES tail: `(?,?,?),(?,?,?)`.
+
+    Inlines literals via render_literal -- safe because all values came
+    out of DuckDB itself (no user-controlled string interpolation here).
+    """
+    from rumi._sql import render_literal as _rl
+
+    parts = []
+    for row in rows:
+        rendered = []
+        for v in row:
+            if isinstance(v, (str, int, float, bool)) or v is None:
+                rendered.append(_rl(v))
+            else:
+                rendered.append(_rl(str(v)))
+        parts.append("(" + ", ".join(rendered) + ")")
+    return ", ".join(parts)
+
+
+def _json_safe(v):
+    """Coerce DuckDB row values to JSON-serializable shapes."""
+    import datetime as _dt
+    import decimal as _dec
+
+    if isinstance(v, (_dt.date, _dt.datetime, _dt.time, _dec.Decimal)):
+        return str(v)
+    return v
+
+
+def _write_or_stdout(text: str, output_file: str | None) -> None:
+    if output_file is None:
+        typer.echo(text, nl=False)
+    else:
+        # Use binary write so embedded newlines (especially CSV's \r\n)
+        # round-trip exactly, without Windows's text-mode translation
+        # turning \r\n into \r\r\n. Tests + downstream tools can rely on
+        # the exact bytes written.
+        Path(output_file).write_bytes(text.encode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Introspection: explain / describe / catalog
+# ---------------------------------------------------------------------------
+
+@app.command()
+def explain(
+    user: str = typer.Option("dev", "--user", help="user_id"),
+    role: str = typer.Option(..., "--role", help="role_id"),
+    attr: list[str] = typer.Option(
+        [], "--attr", help="key=value attribute pair, repeatable"
+    ),
+    dsl: str = typer.Option(
+        None, "--dsl",
+        help="DSL query intent as JSON; parsed + validated + compiled WITHOUT executing",
+    ),
+    dsl_file: str = typer.Option(
+        None, "--dsl-file", help="DSL query intent JSON file",
+    ),
+) -> None:
+    """Parse + validate + compile a DSL intent without executing it.
+
+    Prints:
+      - the compiled SQL
+      - a governance decision summary (allowed columns, injected filter,
+        deny reason if any)
+
+    Useful for preview / sandbox / impact analysis. Does NOT write to the
+    audit log (no execution attempt was made)."""
+    import json as _json
+
+    from rumi.dsl.compile import Catalog, CompileError, compile_intent
+    from rumi.dsl.types import QueryIntent
+    from rumi.dsl.validate import IntentValidationError, validate_intent
+    from rumi.governance.default import DefaultGovernance
+    from rumi.governance.identity import CLIResolver
+    from rumi.observability.default import DefaultObservability
+    from pydantic import ValidationError
+
+    if (dsl is None) == (dsl_file is None):
+        typer.echo("error: provide exactly one of --dsl or --dsl-file", err=True)
+        raise typer.Exit(code=1)
+
+    root = _project_root()
+    db = _db_path(root)
+    if not db.exists():
+        typer.echo(f"error: no DB at {db}; run `rumi init` first", err=True)
+        raise typer.Exit(code=1)
+
+    if dsl is not None:
+        try:
+            raw_intent = _json.loads(dsl)
+        except _json.JSONDecodeError as e:
+            typer.echo(f"error: --dsl is not valid JSON: {e}", err=True)
+            raise typer.Exit(code=1)
+    else:
+        try:
+            raw_intent = _json.loads(Path(dsl_file).read_text(encoding="utf-8"))
+        except (OSError, _json.JSONDecodeError) as e:
+            typer.echo(f"error: --dsl-file: {e}", err=True)
+            raise typer.Exit(code=1)
+
+    attributes = _parse_attrs(attr)
+    identity = CLIResolver(
+        user_id=user, role_id=role, attributes=attributes
+    ).resolve(None)
+
+    con = duckdb.connect(str(db))
+    try:
+        obs = DefaultObservability(con)
+        gov = DefaultGovernance(con, observability=obs)
+
+        try:
+            intent = QueryIntent.model_validate(raw_intent)
+        except ValidationError as e:
+            typer.echo(f"ERROR: intent_parse: {e}", err=True)
+            raise typer.Exit(code=3)
+
+        try:
+            schema = gov.preview_schema(identity, intent.source)
+        except ValueError as e:
+            typer.echo(f"ERROR: unknown_source: {e}", err=True)
+            raise typer.Exit(code=3)
+
+        try:
+            validate_intent(intent, schema)
+        except IntentValidationError as e:
+            typer.echo(f"ERROR: intent_invalid: {e}", err=True)
+            raise typer.Exit(code=3)
+
+        try:
+            sql = compile_intent(intent, Catalog(con))
+        except CompileError as e:
+            typer.echo(f"ERROR: compile_failed: {e}", err=True)
+            raise typer.Exit(code=3)
+
+        # Now consult governance with the columns + metrics the compiled
+        # query would read. This mirrors execution.run_sql_query's evaluate
+        # call but with parsed columns from the compiled SQL.
+        from rumi.execution.sql import _parse_for_governance
+
+        source_id, requested_columns = _parse_for_governance(sql)
+        decision = gov.evaluate(
+            identity,
+            frozenset({source_id}),
+            frozenset(requested_columns),
+            tuple(intent.metrics),
+        )
+
+        typer.echo("-- Compiled SQL --")
+        typer.echo(sql)
+        typer.echo("")
+        typer.echo("-- Governance Decision --")
+        typer.echo(f"allowed:           {decision.allowed}")
+        if decision.deny_reason is not None:
+            typer.echo(
+                f"deny_reason:       {decision.deny_reason.value}"
+                + (f":{decision.deny_detail}" if decision.deny_detail else "")
+            )
+        typer.echo(
+            f"column_allowlist:  {sorted(decision.column_allowlist)}"
+        )
+        typer.echo(
+            f"requested_columns: {sorted(requested_columns)}"
+        )
+        if decision.injected_filter_sql:
+            typer.echo(
+                f"injected_filter:   {decision.injected_filter_sql}"
+            )
+        if decision.metric_versions:
+            typer.echo(
+                "metric_versions:   "
+                + ", ".join(f"{mid}@v{ver}" for mid, ver in decision.metric_versions)
+            )
+        if decision.quality_holds:
+            typer.echo(
+                f"quality_holds:     {list(decision.quality_holds)}"
+            )
+    finally:
+        con.close()
+
+
+@app.command()
+def describe(
+    source: str = typer.Argument(..., help="source_id to describe"),
+    user: str = typer.Option("dev", "--user", help="user_id"),
+    role: str = typer.Option(..., "--role", help="role_id"),
+    attr: list[str] = typer.Option(
+        [], "--attr", help="key=value attribute pair, repeatable"
+    ),
+) -> None:
+    """Show the AllowedSchema for a source under this identity.
+
+    Prints columns (with sensitivity), dimensions, metrics, and the row
+    filter that would be applied. Useful for first-five-minutes UX: 'what
+    can I see and how is it being governed?'"""
+    from rumi.governance.default import DefaultGovernance
+    from rumi.governance.identity import CLIResolver
+    from rumi.observability.default import DefaultObservability
+
+    root = _project_root()
+    db = _db_path(root)
+    if not db.exists():
+        typer.echo(f"error: no DB at {db}; run `rumi init` first", err=True)
+        raise typer.Exit(code=1)
+
+    attributes = _parse_attrs(attr)
+    identity = CLIResolver(
+        user_id=user, role_id=role, attributes=attributes,
+    ).resolve(None)
+
+    con = duckdb.connect(str(db))
+    try:
+        obs = DefaultObservability(con)
+        gov = DefaultGovernance(con, observability=obs)
+        try:
+            schema = gov.preview_schema(identity, source)
+        except ValueError as e:
+            typer.echo(f"error: {e}", err=True)
+            raise typer.Exit(code=1)
+
+        # Row filter is on the policy, not the AllowedSchema. Look it up
+        # directly so we can show what filter would be applied.
+        policy_row = con.execute(
+            "SELECT policy_id, row_filter_ast, default_column_mode "
+            "FROM rumi_policies WHERE role_id = ? AND source_id = ?",
+            [identity.role_id, source],
+        ).fetchone()
+
+        typer.echo(f"source: {schema.source_id} ({schema.source_display_name})")
+        typer.echo(f"role:   {identity.role_id}")
+        if policy_row is None:
+            typer.echo("policy: NONE (no access for this role)")
+            return
+        policy_id, row_filter_ast, default_mode = policy_row
+        typer.echo(
+            f"policy: {policy_id} "
+            f"(default_column_mode={default_mode})"
+        )
+
+        if not schema.columns:
+            typer.echo("\ncolumns: (none accessible)")
+        else:
+            typer.echo("\ncolumns:")
+            for c in schema.columns:
+                desc = f" -- {c.description}" if c.description else ""
+                typer.echo(
+                    f"  {c.name:30s} {c.data_type:20s} "
+                    f"[{c.sensitivity}]{desc}"
+                )
+
+        if not schema.dimensions:
+            typer.echo("\ndimensions: (none)")
+        else:
+            typer.echo("\ndimensions:")
+            for d in schema.dimensions:
+                desc = f" -- {d.description}" if d.description else ""
+                typer.echo(
+                    f"  {d.dimension_id:30s} -> {d.column_name:20s} "
+                    f"[{d.dim_type}]{desc}"
+                )
+
+        if not schema.metrics:
+            typer.echo("\nmetrics: (none)")
+        else:
+            typer.echo("\nmetrics:")
+            for m in schema.metrics:
+                unit = f" {m.unit}" if m.unit else ""
+                deps = f" depends_on={list(m.depends_on)}" if m.depends_on else ""
+                desc = f" -- {m.description}" if m.description else ""
+                typer.echo(
+                    f"  {m.metric_id:30s} [{m.metric_type}]{unit}{deps}{desc}"
+                )
+
+        if row_filter_ast:
+            typer.echo(f"\nrow_filter (raw AST): {row_filter_ast}")
+        else:
+            typer.echo("\nrow_filter: (none)")
+    finally:
+        con.close()
+
+
+@app.command()
+def catalog(
+    user: str = typer.Option("dev", "--user", help="user_id"),
+    role: str = typer.Option(..., "--role", help="role_id"),
+    attr: list[str] = typer.Option(
+        [], "--attr", help="key=value attribute pair, repeatable"
+    ),
+) -> None:
+    """List sources accessible to this identity.
+
+    Shows column / dimension / metric counts per source. A source is
+    'accessible' if the role has any policy covering it (the policy may
+    still deny individual columns)."""
+    from rumi.governance.default import DefaultGovernance
+    from rumi.governance.identity import CLIResolver
+    from rumi.observability.default import DefaultObservability
+
+    root = _project_root()
+    db = _db_path(root)
+    if not db.exists():
+        typer.echo(f"error: no DB at {db}; run `rumi init` first", err=True)
+        raise typer.Exit(code=1)
+
+    attributes = _parse_attrs(attr)
+    identity = CLIResolver(
+        user_id=user, role_id=role, attributes=attributes,
+    ).resolve(None)
+
+    con = duckdb.connect(str(db))
+    try:
+        obs = DefaultObservability(con)
+        gov = DefaultGovernance(con, observability=obs)
+        source_rows = con.execute(
+            "SELECT s.source_id "
+            "FROM rumi_sources s "
+            "JOIN rumi_policies p ON p.source_id = s.source_id "
+            "WHERE p.role_id = ? "
+            "ORDER BY s.source_id",
+            [identity.role_id],
+        ).fetchall()
+        if not source_rows:
+            typer.echo(f"no sources accessible to role {identity.role_id!r}")
+            return
+
+        typer.echo(f"role: {identity.role_id}  ({len(source_rows)} source(s))")
+        for (sid,) in source_rows:
+            schema = gov.preview_schema(identity, sid)
+            typer.echo(
+                f"  {sid:30s} "
+                f"columns={len(schema.columns):3d} "
+                f"dimensions={len(schema.dimensions):3d} "
+                f"metrics={len(schema.metrics):3d}"
+            )
+    finally:
+        con.close()
+
+
+def _parse_attrs(attr: list[str]) -> dict[str, str]:
+    attributes: dict[str, str] = {}
+    for kv in attr:
+        if "=" not in kv:
+            typer.echo(f"error: --attr must be key=value, got {kv!r}", err=True)
+            raise typer.Exit(code=1)
+        k, v = kv.split("=", 1)
+        attributes[k] = v
+    return attributes
 
 
 if __name__ == "__main__":
