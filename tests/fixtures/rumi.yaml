@@ -1,8 +1,8 @@
 sources:
   - id: orders
     display_name: Orders
-    type: parquet
-    uri: tests/data/orders.parquet
+    type: duckdb_table
+    uri: orders
     primary_grain: order_id
     columns:
       - name: order_id

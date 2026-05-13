@@ -166,7 +166,14 @@ def _parse_for_governance(sql: str) -> tuple[str, frozenset[str]]:
         raise UnsupportedQueryError(
             f"V1 supports exactly one source; got {len(tables)}"
         )
-    source_id = tables[0].name
+    # Resolve the source identifier. For a relational FROM (`FROM orders`,
+    # `FROM orders o`), `table.name` is the relation name and we use that
+    # -- aliases like `o` are local to the query and not the governance key.
+    # For a file-scan FROM (`FROM read_parquet('x.parquet') AS orders`),
+    # `table.name` is empty because the relation is a function call; we
+    # fall back to the alias, which the DSL compiler attaches precisely so
+    # governance can locate the source.
+    source_id = tables[0].name or tables[0].alias_or_name
 
     # Collect SELECT aliases so we can distinguish real column references
     # from alias references (which appear in HAVING / ORDER BY when DSL

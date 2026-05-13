@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 import duckdb
 
+from rumi._source_dispatch import SourceDispatchError, from_clause_for_source
 from rumi._sql import qident, render_literal
 from rumi.dsl.types import DimensionRef, QueryIntent
 from rumi.governance.ast import compile_intent_to_sql
@@ -114,6 +115,11 @@ def compile_intent(intent: QueryIntent, catalog: Catalog) -> str:
       2. dsl.validate.validate_intent passed (semantic check vs AllowedSchema)"""
     catalog.get_source_uri(intent.source)  # existence check; raises if unknown
 
+    try:
+        from_relation = from_clause_for_source(catalog.con, intent.source)
+    except SourceDispatchError as e:
+        raise CompileError(str(e)) from e
+
     metric_metas = [catalog.get_metric(m) for m in intent.metrics]
     dim_metas = [
         (dim, catalog.get_dimension(dim.id)) for dim in intent.dimensions
@@ -137,7 +143,15 @@ def compile_intent(intent: QueryIntent, catalog: Catalog) -> str:
     having_parts = [_render_having(h) for h in intent.having]
 
     select_clause = "SELECT\n  " + ",\n  ".join(select_parts)
-    from_clause = f"FROM {qident(intent.source)}"
+    # For relational sources (duckdb_table / sql_view) the dispatcher returns
+    # a quoted identifier and we use it bare. For file-scan sources
+    # (read_parquet / read_csv) we attach an alias matching intent.source so
+    # the execution-layer parser still sees a "table name" (via alias_or_name)
+    # and governance can locate the source.
+    if from_relation.startswith(("read_parquet(", "read_csv(")):
+        from_clause = f"FROM {from_relation} AS {qident(intent.source)}"
+    else:
+        from_clause = f"FROM {from_relation}"
     where_clause = (
         "\nWHERE " + "\n  AND ".join(where_parts) if where_parts else ""
     )

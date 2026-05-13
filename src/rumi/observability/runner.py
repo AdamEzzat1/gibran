@@ -5,11 +5,10 @@ catalog, executes each one against the actual data, calls
 `DefaultObservability.record_run` to log the result, and then triggers
 `refresh_health` to denormalize the latest state into rumi_source_health.
 
-V1 limitation: the runner assumes `source_id` is also the DuckDB relation
-name (table or view). Real source dispatch (parquet / csv / sql_view
-adapters that build the relation on demand) is deferred. Users who
-register a parquet source must currently create a view of the same name
-before running `rumi check`."""
+The FROM-clause for each rule is built via `_source_dispatch`, so parquet
+and csv sources work natively (no manual `CREATE VIEW` required). The
+rule's SQL is the same shape regardless of source_type -- only the
+relation fragment differs."""
 from __future__ import annotations
 
 import json
@@ -18,6 +17,7 @@ from typing import Any, Literal
 
 import duckdb
 
+from rumi._source_dispatch import from_clause_for_source
 from rumi._sql import qident, render_literal
 
 
@@ -124,7 +124,7 @@ def _evaluate_quality_rule(
     rule_type: str,
     rule_config: dict[str, Any],
 ) -> tuple[bool, dict[str, Any]]:
-    relation = qident(source_id)
+    relation = from_clause_for_source(con, source_id)
 
     if rule_type == "not_null":
         col = qident(rule_config["column"])
@@ -184,7 +184,7 @@ def _evaluate_freshness_rule(
     watermark_column: str,
     max_age_seconds: int,
 ) -> tuple[bool, dict[str, Any]]:
-    relation = qident(source_id)
+    relation = from_clause_for_source(con, source_id)
     col = qident(watermark_column)
     row = con.execute(
         f"SELECT MAX({col}), "
