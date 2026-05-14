@@ -53,6 +53,13 @@ def from_clause_for_source(
     if row is None:
         raise SourceDispatchError(f"unknown source: {source_id!r}")
     source_type, uri = row
+    return build_from_clause(source_type, uri)
+
+
+def build_from_clause(source_type: str, uri: str) -> str:
+    """Pure-function form of from_clause_for_source: takes (source_type, uri)
+    directly, without a DB lookup. Used by the drift detector at sync time
+    where the source isn't in `gibran_sources` yet."""
     return _build_from(source_type, uri)
 
 

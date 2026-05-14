@@ -324,6 +324,21 @@ def sync(
         return
     con = duckdb.connect(str(db))
     try:
+        # Drift detection runs BEFORE apply so the warnings reflect the
+        # discrepancy between intent (YAML) and reality (the live source).
+        # Drift is informational; the apply still proceeds. Sources we
+        # can't probe are reported separately as "schema not probable" --
+        # not knowing whether there's drift is distinct from there being
+        # drift.
+        from gibran.sync.drift import detect_drift
+        drift_events, unreachable = detect_drift(con, validated.config)
+        for e in drift_events:
+            typer.echo(e.as_warning(), err=True)
+        for u in unreachable:
+            typer.echo(
+                f"warning: {u.source_id}: schema not probable ({u.reason})",
+                err=True,
+            )
         counts = apply_config(con, validated)
     finally:
         con.close()

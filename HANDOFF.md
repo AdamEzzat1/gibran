@@ -6,8 +6,8 @@ with `STATUS.md` (current-state snapshot) but is forward-looking: what to
 build next, why, and in what order.
 
 Commit checkpoint: `c77f911` — Initial commit: Gibran V1.
-Last verified: `4b0e8a1` — Tier 2 Item 6 complete (time-bound policies +
-audit-log redaction). 334 tests passing.
+Last verified: Tier 2 Items 6 + 7 complete (time-bound policies + audit-log
+redaction; schema-drift detection in `gibran sync`). 349 tests passing.
 
 ---
 
@@ -331,6 +331,11 @@ high-leverage); (b) benchmarks become a prerequisite for any perf work;
    with evaluate-time expiry check; literal redactor over both
    `generated_sql` and `nl_prompt` for pii/restricted columns. +40 tests.*
 7. **Schema-drift detection in `gibran sync`** (DQ small-but-high-leverage).
+   *Done. `gibran sync` now probes each YAML-declared source via the
+   dispatcher's `DESCRIBE SELECT *` shape and emits warnings for
+   `missing_in_db` / `missing_in_yaml` / `type_mismatch`. Sources that
+   can't be probed land in a separate `unreachable` list (not knowing
+   whether there's drift is distinct from there being drift). +15 tests.*
 8. **Populate `example_values`** for low-cardinality public columns
    (prerequisite for `gibran describe` to be useful + any future NL layer).
 9. **Benchmarks** — `tests/benchmarks/` with small/medium/large
