@@ -6,7 +6,7 @@ Measures three things at three data sizes:
      single SELECT primitive
   3. End-to-end query time for cohort_retention (3-CTE shape)
 
-Why this exists: per HANDOFF.md, until perf measurements exist any
+Why this exists: per ROADMAP.md, until perf measurements exist any
 "this is faster" claim is fiction. These baselines give us
 apples-to-apples comparison points for future perf work (plan caching,
 result caching, etc.).

@@ -23,7 +23,7 @@ Per-process scope
 The cache lives in module-level state -- one process, one cache. In a
 multi-process deployment each process maintains its own. Cross-process
 plan caching would need a shared store (e.g. Redis); deferred until the
-deployment shape is decided (per HANDOFF.md).
+deployment shape is decided (per ROADMAP.md).
 """
 from __future__ import annotations
 

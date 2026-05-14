@@ -1052,7 +1052,7 @@ def ask(
     of templates, resolve slots against the role's AllowedSchema, and
     execute. No invention -- if no pattern matches AND resolves, the
     command prints "I don't know how to answer that" and exits with
-    code 4. This is the Tier 5 non-LLM design (per HANDOFF.md): an
+    code 4. This is the Tier 5 non-LLM design (per ROADMAP.md): an
     NL layer that can FAIL to parse but cannot fabricate references."""
     from gibran.governance.default import DefaultGovernance
     from gibran.governance.types import IdentityContext

@@ -23,7 +23,7 @@ close:
 3. **Materialized metrics fully rebuild on every sync.** Fine at 10k
    rows; P0 issue at any real scale.
 4. **NL coverage is 6 patterns.** Architecture supports ~30; mechanical
-   work to close the gap. Per HANDOFF.md, no LLM in any emission path.
+   work to close the gap. Per the locked Tier-5 constraint, no LLM in any emission path.
 5. **No UI.** The audience that can use Gibran today is the audience
    that reads docs. A `gibran ui` command would 5x that.
 

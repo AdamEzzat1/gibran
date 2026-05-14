@@ -583,7 +583,7 @@ cannot fabricate a metric that doesn't exist.
 | `single_metric` | "show me revenue" / "what's the p95 amount" | Bare metric selection |
 
 Adding patterns is mechanical (decorator + builder). The architecture
-supports ~30 cleanly per HANDOFF estimate.
+supports ~30 cleanly per the architecture estimate.
 
 ## CLI reference
 
@@ -621,7 +621,6 @@ migrations/           # 0001 catalog -> 0009 tier4_governance
 tests/                # 456 tests across 23 files (+ benchmarks/)
 prompts/
   architect_layer.md  # refined architect prompt with fixed constraints
-HANDOFF.md            # forward-looking priority list
 STATUS.md             # current per-layer state
 ```
 
@@ -645,7 +644,7 @@ python -m pytest tests
 - **Multi-tenancy** — V2 architectural pass; `tenant_id` would need to
   propagate through every governance table.
 
-See `HANDOFF.md` for the full prioritized roadmap.
+See `ROADMAP.md` for the V0.1 phased roadmap.
 
 ## License
 

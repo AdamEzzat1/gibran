@@ -15,7 +15,7 @@ according to its change_type and route it through the appropriate
 applier. Keeping the queue passive avoids tangling the approval table
 with the apply machinery.
 
-Why this exists: per HANDOFF.md, high-sensitivity changes (touching
+Why this exists: per ROADMAP.md, high-sensitivity changes (touching
 PII / restricted columns, modifying break-glass roles) shouldn't be
 single-author commits to the catalog. The approval queue gives an
 out-of-band reviewer a chance to inspect before the change becomes

@@ -5,7 +5,7 @@ caps how many `governance.evaluate` calls a single identity can make
 per second. Useful for single-process deployments (the embedded
 DuckDB + library shape Gibran ships as).
 
-V2 caveat (per HANDOFF.md): in a multi-process deployment, this
+V2 caveat (per ROADMAP.md): in a multi-process deployment, this
 becomes false security -- each process has its own bucket, so a user
 running N processes gets N times the rate. Cross-process limiting
 needs Redis-or-equivalent shared state and is deferred until the
