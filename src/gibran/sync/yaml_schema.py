@@ -83,10 +83,35 @@ class MetricConfig(_Strict):
     # materialization (the metric value over the whole source, no
     # grouping). Validated below + by loader.
     materialized: list[str] | None = None
+    # Materialization strategy (Phase 2C):
+    #   "full"        -- rebuild the gibran_mat_<id> table on every sync.
+    #                    Simple, correct, but O(source rows) per sync.
+    #   "incremental" -- DELETE + INSERT only rows where watermark_column
+    #                    is newer than the last refresh's watermark. Requires
+    #                    watermark_column (typically a TIMESTAMP).
+    # Default "full" matches pre-Phase-2C behavior; opt-in for incremental.
+    materialized_strategy: Literal["full", "incremental"] | None = None
+    watermark_column: str | None = None
+    # Grace window for incremental refresh: rows where
+    # watermark_column > (last_refresh_watermark - late_arrival_grace_seconds)
+    # are re-evaluated each pass. Defends against rows arriving with a
+    # backdated watermark (e.g. an order whose order_date is yesterday but
+    # was inserted today). Default 0 = no grace, exact-match watermark.
+    late_arrival_grace_seconds: int | None = None
 
     @model_validator(mode="after")
     def _check_materialized_compat(self) -> "MetricConfig":
         if self.materialized is None:
+            if (
+                self.materialized_strategy is not None
+                or self.watermark_column is not None
+                or self.late_arrival_grace_seconds is not None
+            ):
+                raise ValueError(
+                    f"metric {self.id!r}: materialized_strategy / "
+                    f"watermark_column / late_arrival_grace_seconds require "
+                    f"`materialized` to be set"
+                )
             return self
         # V1 restriction: only simple aggregates can be materialized.
         # Shape primitives (cohort/funnel/multi_stage_filter) have
@@ -104,6 +129,35 @@ class MetricConfig(_Strict):
                 f"sum / avg / min / max / percentile / count_distinct / "
                 f"count_distinct_approx / stddev_samp / stddev_pop / mode "
                 f"/ weighted_avg / variance / first_value / last_value / median)"
+            )
+        if self.materialized_strategy == "incremental":
+            if not self.watermark_column:
+                raise ValueError(
+                    f"metric {self.id!r}: materialized_strategy=incremental "
+                    f"requires `watermark_column`"
+                )
+            if not self.materialized:
+                raise ValueError(
+                    f"metric {self.id!r}: scalar materialization "
+                    f"(`materialized: []`) is incompatible with "
+                    f"materialized_strategy=incremental -- a single scalar "
+                    f"value has nothing to incrementally update; use "
+                    f"materialized_strategy=full or specify dimensions"
+                )
+            if (
+                self.late_arrival_grace_seconds is not None
+                and self.late_arrival_grace_seconds < 0
+            ):
+                raise ValueError(
+                    f"metric {self.id!r}: late_arrival_grace_seconds must "
+                    f"be >= 0, got {self.late_arrival_grace_seconds}"
+                )
+        elif self.watermark_column is not None:
+            # watermark_column without strategy=incremental is meaningless;
+            # call it out so users don't think they've enabled incremental.
+            raise ValueError(
+                f"metric {self.id!r}: watermark_column is only meaningful "
+                f"with materialized_strategy=incremental"
             )
         return self
 

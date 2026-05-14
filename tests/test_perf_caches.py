@@ -428,3 +428,260 @@ class TestMaterializedMetrics:
         assert "gibran_mat_m_revenue_by_region" in rendered
         # Source-table reference should NOT appear -- we routed away.
         assert "FROM \"orders\"" not in rendered
+
+
+# ---------------------------------------------------------------------------
+# Phase 2C: incremental materialization
+# ---------------------------------------------------------------------------
+
+class TestIncrementalMaterializationValidation:
+    """Pydantic-level checks on the new YAML fields."""
+
+    def test_incremental_requires_watermark_column(self) -> None:
+        from gibran.sync.yaml_schema import MetricConfig
+        with pytest.raises(ValueError, match="requires `watermark_column`"):
+            MetricConfig(
+                id="m", source="orders", display_name="m",
+                type="sum", expression="amount",
+                materialized=["orders.region"],
+                materialized_strategy="incremental",
+            )
+
+    def test_watermark_without_incremental_rejected(self) -> None:
+        from gibran.sync.yaml_schema import MetricConfig
+        with pytest.raises(
+            ValueError,
+            match="watermark_column is only meaningful with "
+                  "materialized_strategy=incremental",
+        ):
+            MetricConfig(
+                id="m", source="orders", display_name="m",
+                type="sum", expression="amount",
+                materialized=["orders.region"],
+                watermark_column="order_date",
+            )
+
+    def test_scalar_incremental_rejected(self) -> None:
+        # Empty materialized list (scalar) + incremental is meaningless --
+        # nothing to incrementally update.
+        from gibran.sync.yaml_schema import MetricConfig
+        with pytest.raises(
+            ValueError, match="scalar materialization .* incompatible",
+        ):
+            MetricConfig(
+                id="m", source="orders", display_name="m",
+                type="sum", expression="amount",
+                materialized=[],
+                materialized_strategy="incremental",
+                watermark_column="order_date",
+            )
+
+    def test_negative_grace_rejected(self) -> None:
+        from gibran.sync.yaml_schema import MetricConfig
+        with pytest.raises(
+            ValueError, match="late_arrival_grace_seconds must be >= 0",
+        ):
+            MetricConfig(
+                id="m", source="orders", display_name="m",
+                type="sum", expression="amount",
+                materialized=["orders.region"],
+                materialized_strategy="incremental",
+                watermark_column="order_date",
+                late_arrival_grace_seconds=-5,
+            )
+
+    def test_strategy_without_materialized_rejected(self) -> None:
+        # materialized_strategy on a non-materialized metric is a
+        # configuration mistake -- caught at validation.
+        from gibran.sync.yaml_schema import MetricConfig
+        with pytest.raises(
+            ValueError, match="require `materialized` to be set",
+        ):
+            MetricConfig(
+                id="m", source="orders", display_name="m",
+                type="sum", expression="amount",
+                materialized_strategy="full",
+            )
+
+
+def _incremental_yaml_fixture(tmp_path: Path) -> Path:
+    """Materializes gross_revenue by region with incremental strategy
+    over order_date. Used by the incremental refresh tests below."""
+    yaml_path = tmp_path / "gibran.yaml"
+    text = (FIXTURES / "gibran.yaml").read_text(encoding="utf-8")
+    text = text.replace(
+        "    description: Sum of paid order amounts.",
+        "    description: Sum of paid order amounts.\n"
+        "    materialized: [orders.region]\n"
+        "    materialized_strategy: incremental\n"
+        "    watermark_column: order_date",
+    )
+    yaml_path.write_text(text, encoding="utf-8")
+    return yaml_path
+
+
+def _provision_orders(con: duckdb.DuckDBPyConnection) -> None:
+    con.execute(
+        "CREATE TABLE orders ("
+        "order_id VARCHAR, amount DECIMAL(18,2), order_date TIMESTAMP, "
+        "status VARCHAR, region VARCHAR, customer_email VARCHAR)"
+    )
+    con.execute(
+        "INSERT INTO orders VALUES "
+        "('o1', 100, TIMESTAMP '2026-01-05', 'paid', 'west', 'a@x'),"
+        "('o2', 200, TIMESTAMP '2026-01-10', 'paid', 'east', 'b@x'),"
+        "('o3',  50, TIMESTAMP '2026-02-15', 'paid', 'west', 'c@x')"
+    )
+
+
+class TestIncrementalMaterializationRefresh:
+    """End-to-end behavior: apply, mutate, re-materialize, check sums."""
+
+    def test_first_run_does_full_build_and_records_watermark(
+        self, tmp_path: Path,
+    ) -> None:
+        from gibran.sync.applier import _materialize_metrics
+        yaml_path = _incremental_yaml_fixture(tmp_path)
+        con = duckdb.connect(":memory:")
+        apply_migrations(con, MIGRATIONS)
+        _provision_orders(con)
+        apply_config(con, load_config(yaml_path))
+        # After apply (which calls _materialize_metrics), the mat table
+        # has aggregates for all regions and the state row records the
+        # latest watermark.
+        rows = con.execute(
+            "SELECT * FROM gibran_mat_gross_revenue ORDER BY \"orders.region\""
+        ).fetchall()
+        assert {r[0]: float(r[1]) for r in rows} == {
+            "west": 150.0, "east": 200.0,
+        }
+        state = con.execute(
+            "SELECT last_refresh_watermark FROM gibran_mat_state "
+            "WHERE metric_id = 'gross_revenue'"
+        ).fetchone()
+        assert state is not None
+        # The recorded watermark is MAX(order_date) over the source.
+        # The exact serialized form depends on DuckDB's CAST(... AS VARCHAR)
+        # for TIMESTAMP -- assert the year/month/day are present.
+        assert "2026-02-15" in state[0]
+
+    def test_incremental_picks_up_new_rows_for_existing_dim(
+        self, tmp_path: Path,
+    ) -> None:
+        # The bug-class test: dim "west" has rows in the original data
+        # AND new rows after the watermark. Incremental refresh must
+        # produce the CORRECT new aggregate (old + new), not just the
+        # aggregate of new rows.
+        from gibran.sync.applier import _materialize_metrics
+        yaml_path = _incremental_yaml_fixture(tmp_path)
+        con = duckdb.connect(":memory:")
+        apply_migrations(con, MIGRATIONS)
+        _provision_orders(con)
+        validated = load_config(yaml_path)
+        apply_config(con, validated)
+        # After initial apply: west=150, east=200.
+        # Insert a new row that should bump west by 25.
+        con.execute(
+            "INSERT INTO orders VALUES "
+            "('o4', 25, TIMESTAMP '2026-03-01', 'paid', 'west', 'd@x')"
+        )
+        _materialize_metrics(con, validated.config.metrics)
+        rows = con.execute(
+            "SELECT * FROM gibran_mat_gross_revenue ORDER BY \"orders.region\""
+        ).fetchall()
+        # west should be 150 + 25 = 175 (NOT 25, which would be the bug).
+        # east should be unchanged at 200.
+        assert {r[0]: float(r[1]) for r in rows} == {
+            "west": 175.0, "east": 200.0,
+        }
+
+    def test_incremental_leaves_untouched_dims_alone(
+        self, tmp_path: Path,
+    ) -> None:
+        # If new data only arrives for "west", the "east" row in the
+        # mat table must not be touched (no DELETE + re-INSERT for it).
+        from gibran.sync.applier import _materialize_metrics
+        yaml_path = _incremental_yaml_fixture(tmp_path)
+        con = duckdb.connect(":memory:")
+        apply_migrations(con, MIGRATIONS)
+        _provision_orders(con)
+        validated = load_config(yaml_path)
+        apply_config(con, validated)
+        # Mutate east in the source table to simulate something the
+        # mat table should NOT pick up (it's not in the watermark window).
+        # This is a bit contrived -- in practice you can't update history
+        # silently -- but it pins the "untouched dims preserved" contract.
+        con.execute(
+            "UPDATE orders SET amount = 999 "
+            "WHERE order_id = 'o2'"
+        )
+        _materialize_metrics(con, validated.config.metrics)
+        rows = con.execute(
+            "SELECT * FROM gibran_mat_gross_revenue ORDER BY \"orders.region\""
+        ).fetchall()
+        # east remains 200 (the original aggregate) because no new row
+        # was inserted with order_date > last watermark.
+        assert {r[0]: float(r[1]) for r in rows} == {
+            "west": 150.0, "east": 200.0,
+        }
+
+    def test_force_full_rebuilds_everything(self, tmp_path: Path) -> None:
+        # `gibran materialize --full` bypasses the watermark and rebuilds
+        # from scratch, picking up backdated mutations.
+        from gibran.sync.applier import _materialize_metrics
+        yaml_path = _incremental_yaml_fixture(tmp_path)
+        con = duckdb.connect(":memory:")
+        apply_migrations(con, MIGRATIONS)
+        _provision_orders(con)
+        validated = load_config(yaml_path)
+        apply_config(con, validated)
+        # Same silent mutation as above.
+        con.execute("UPDATE orders SET amount = 999 WHERE order_id = 'o2'")
+        _materialize_metrics(
+            con, validated.config.metrics, force_full=True,
+        )
+        rows = con.execute(
+            "SELECT * FROM gibran_mat_gross_revenue ORDER BY \"orders.region\""
+        ).fetchall()
+        # east is now 999 (the new amount) because force_full re-aggregated.
+        assert {r[0]: float(r[1]) for r in rows} == {
+            "west": 150.0, "east": 999.0,
+        }
+
+    def test_late_arriving_row_within_grace_picked_up(
+        self, tmp_path: Path,
+    ) -> None:
+        # late_arrival_grace_seconds = 86400 (1 day) means rows with
+        # order_date as late as 1 day BEFORE last_refresh_watermark are
+        # re-evaluated. A row backdated 1 hour into the past should be
+        # picked up.
+        from gibran.sync.applier import _materialize_metrics
+        yaml_path = tmp_path / "gibran.yaml"
+        text = (FIXTURES / "gibran.yaml").read_text(encoding="utf-8")
+        text = text.replace(
+            "    description: Sum of paid order amounts.",
+            "    description: Sum of paid order amounts.\n"
+            "    materialized: [orders.region]\n"
+            "    materialized_strategy: incremental\n"
+            "    watermark_column: order_date\n"
+            "    late_arrival_grace_seconds: 86400",
+        )
+        yaml_path.write_text(text, encoding="utf-8")
+        con = duckdb.connect(":memory:")
+        apply_migrations(con, MIGRATIONS)
+        _provision_orders(con)
+        validated = load_config(yaml_path)
+        apply_config(con, validated)
+        # Last watermark is 2026-02-15. Insert a row dated 1 hour
+        # earlier than that (within grace).
+        con.execute(
+            "INSERT INTO orders VALUES "
+            "('o4', 10, TIMESTAMP '2026-02-15 00:00:00', 'paid', 'east', 'd@x')"
+        )
+        _materialize_metrics(con, validated.config.metrics)
+        rows = con.execute(
+            "SELECT * FROM gibran_mat_gross_revenue ORDER BY \"orders.region\""
+        ).fetchall()
+        # east should be 200 + 10 = 210 because the backdated row was
+        # within the grace window.
+        assert {r[0]: float(r[1]) for r in rows}["east"] == 210.0

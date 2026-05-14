@@ -602,6 +602,7 @@ supports ~30 cleanly per the architecture estimate.
 | **`gibran detect-access-anomalies`** | Scan `gibran_query_log` for users whose query volume today is > N sigma above their trailing baseline. |
 | **`gibran check --watch --interval N`** | In-process scheduler: loops on N-second intervals. Local-dev / small-deployment shape only — production should use cron / systemd / k8s CronJob. |
 | **`gibran touch <source_id>`** | Bump a source's data-version token so the result cache invalidates cached rows. Useful after writing to a `duckdb_table` source externally. For `parquet` / `csv` the cache picks up file mtime automatically — no touch needed. |
+| **`gibran materialize [--metric <id>] [--full]`** | Refresh materialized-metric tables without a full sync. For `materialized_strategy: incremental` metrics, applies the DELETE + re-INSERT pass for dim-tuples newer than the last watermark. `--full` forces a full rebuild (e.g. for backfills). |
 
 ## Project layout
 

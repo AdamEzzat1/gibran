@@ -88,19 +88,35 @@ def apply(con: duckdb.DuckDBPyConnection, validated: ValidatedConfig) -> dict[st
 
 
 def _materialize_metrics(
-    con: duckdb.DuckDBPyConnection, metrics: list[MetricConfig]
+    con: duckdb.DuckDBPyConnection,
+    metrics: list[MetricConfig],
+    *,
+    only_metric_id: str | None = None,
+    force_full: bool = False,
 ) -> None:
-    """For each metric with `materialized: [dim_ids...]`, build and run
-    a `CREATE OR REPLACE TABLE gibran_mat_<metric_id> AS SELECT ...`
-    statement. Best-effort: errors are caught and reported on stderr,
-    but the sync continues so a misconfigured materialization doesn't
-    poison the whole catalog."""
+    """For each metric with `materialized: [dim_ids...]`, refresh the
+    `gibran_mat_<metric_id>` table.
+
+    Two strategies (per metric's `materialized_strategy`):
+      * full         -- CREATE OR REPLACE TABLE ... (the V1 default)
+      * incremental  -- DELETE rows for any dim-tuple touched by the
+                        watermark window, then INSERT re-aggregated rows
+                        for those dim-tuples from the FULL source data.
+
+    `only_metric_id` limits the refresh to a single metric (the
+    `gibran materialize --metric <id>` path). `force_full` overrides
+    `materialized_strategy=incremental` to rebuild from scratch -- useful
+    for backfills after a schema change.
+
+    Best-effort: errors are caught and reported on stderr so a single
+    misconfigured materialization doesn't poison the whole sync."""
     from gibran._source_dispatch import build_from_clause, SourceDispatchError
-    from gibran._sql import qident
     import sys
 
     for m in metrics:
         if m.materialized is None:
+            continue
+        if only_metric_id is not None and m.id != only_metric_id:
             continue
         try:
             source_row = con.execute(
@@ -112,59 +128,213 @@ def _materialize_metrics(
             source_type, uri = source_row
             from_clause = build_from_clause(source_type, uri)
 
-            # Resolve each dim_id to its (column_name, dim_type) so we
-            # can emit DATE_TRUNC for temporal dims at the appropriate
-            # grain. V1: dims materialize at their base grain (no DATE_TRUNC
-            # applied here -- the compiler does the date-truncation when
-            # routing a query that asks for a coarser grain).
-            dim_columns: list[tuple[str, str]] = []
-            for dim_id in m.materialized:
-                dim_row = con.execute(
-                    "SELECT column_name FROM gibran_dimensions WHERE dimension_id = ?",
-                    [dim_id],
-                ).fetchone()
-                if dim_row is None:
-                    raise ValueError(
-                        f"materialized dimension {dim_id!r} not found in catalog"
-                    )
-                dim_columns.append((dim_id, dim_row[0]))
+            dim_columns = _resolve_materialized_dim_columns(con, m)
+            strategy = m.materialized_strategy or "full"
 
-            # Build the SELECT. Materializing the metric expression
-            # in-place (e.g. SUM(amount)) since we only allow direct
-            # aggregates here.
-            metric_expr = _render_expression(m)
-            if m.filter:
-                metric_expr = f"{metric_expr} FILTER (WHERE {m.filter})"
-
-            mat_table = f"gibran_mat_{m.id}"
-            if not dim_columns:
-                # Scalar materialization: single row, just the metric value.
-                create_sql = (
-                    f"CREATE OR REPLACE TABLE {qident(mat_table)} AS\n"
-                    f"SELECT {metric_expr} AS {qident(m.id)}\n"
-                    f"FROM {from_clause}"
-                )
-            else:
-                select_parts = [
-                    f"{qident(col)} AS {qident(dim_id)}"
-                    for dim_id, col in dim_columns
-                ]
-                select_parts.append(f"{metric_expr} AS {qident(m.id)}")
-                group_by = ", ".join(
-                    str(i + 1) for i in range(len(dim_columns))
-                )
-                create_sql = (
-                    f"CREATE OR REPLACE TABLE {qident(mat_table)} AS\n"
-                    f"SELECT " + ", ".join(select_parts) + "\n"
-                    f"FROM {from_clause}\n"
-                    f"GROUP BY {group_by}"
-                )
-            con.execute(create_sql)
+            if force_full or strategy == "full":
+                _materialize_full(con, m, from_clause, dim_columns)
+                # If we forced full on an incremental metric, reset its
+                # state row so the NEXT incremental pass starts fresh.
+                if force_full and strategy == "incremental":
+                    _record_refresh_watermark(con, m, from_clause)
+            else:  # incremental
+                _materialize_incremental(con, m, from_clause, dim_columns)
         except (SourceDispatchError, Exception) as e:
             print(
                 f"warning: failed to materialize {m.id!r}: {e}",
                 file=sys.stderr,
             )
+
+
+def _resolve_materialized_dim_columns(
+    con: duckdb.DuckDBPyConnection, m: MetricConfig,
+) -> list[tuple[str, str]]:
+    """Resolve each dim_id in m.materialized to (dim_id, column_name)."""
+    assert m.materialized is not None
+    dim_columns: list[tuple[str, str]] = []
+    for dim_id in m.materialized:
+        dim_row = con.execute(
+            "SELECT column_name FROM gibran_dimensions WHERE dimension_id = ?",
+            [dim_id],
+        ).fetchone()
+        if dim_row is None:
+            raise ValueError(
+                f"materialized dimension {dim_id!r} not found in catalog"
+            )
+        dim_columns.append((dim_id, dim_row[0]))
+    return dim_columns
+
+
+def _metric_expr_with_filter(m: MetricConfig) -> str:
+    """Render the metric expression with the per-metric FILTER (WHERE)
+    clause attached, if any."""
+    expr = _render_expression(m)
+    if m.filter:
+        expr = f"{expr} FILTER (WHERE {m.filter})"
+    return expr
+
+
+def _materialize_full(
+    con: duckdb.DuckDBPyConnection,
+    m: MetricConfig,
+    from_clause: str,
+    dim_columns: list[tuple[str, str]],
+) -> None:
+    """CREATE OR REPLACE TABLE ... -- the V1 default refresh strategy."""
+    from gibran._sql import qident
+
+    metric_expr = _metric_expr_with_filter(m)
+    mat_table = f"gibran_mat_{m.id}"
+    if not dim_columns:
+        create_sql = (
+            f"CREATE OR REPLACE TABLE {qident(mat_table)} AS\n"
+            f"SELECT {metric_expr} AS {qident(m.id)}\n"
+            f"FROM {from_clause}"
+        )
+    else:
+        select_parts = [
+            f"{qident(col)} AS {qident(dim_id)}"
+            for dim_id, col in dim_columns
+        ]
+        select_parts.append(f"{metric_expr} AS {qident(m.id)}")
+        group_by = ", ".join(str(i + 1) for i in range(len(dim_columns)))
+        create_sql = (
+            f"CREATE OR REPLACE TABLE {qident(mat_table)} AS\n"
+            f"SELECT " + ", ".join(select_parts) + "\n"
+            f"FROM {from_clause}\n"
+            f"GROUP BY {group_by}"
+        )
+    con.execute(create_sql)
+
+
+def _materialize_incremental(
+    con: duckdb.DuckDBPyConnection,
+    m: MetricConfig,
+    from_clause: str,
+    dim_columns: list[tuple[str, str]],
+) -> None:
+    """Incremental refresh via DELETE + re-INSERT for dim-tuples touched
+    by the watermark window.
+
+    Correctness: the INSERT re-aggregates over the FULL source for any
+    dim-tuple that has at least one row in the window -- not just the
+    window rows. This means existing aggregates already in the table
+    for "old" dim-tuples are preserved untouched, and aggregates for
+    dim-tuples with new data are fully recomputed from source. The
+    naive "just insert window rows" approach would lose the old
+    contribution for any dim that has both old and new rows.
+
+    On first run (no row in gibran_mat_state) we fall back to a full
+    rebuild, then record the current MAX(watermark_column) so the
+    NEXT pass has a baseline.
+    """
+    from gibran._sql import qident
+
+    assert m.watermark_column is not None
+    mat_table = f"gibran_mat_{m.id}"
+    grace = m.late_arrival_grace_seconds or 0
+
+    # Check existing state.
+    state_row = con.execute(
+        "SELECT last_refresh_watermark FROM gibran_mat_state WHERE metric_id = ?",
+        [m.id],
+    ).fetchone()
+
+    if state_row is None or state_row[0] is None:
+        # First-time materialization: full rebuild, then record watermark.
+        _materialize_full(con, m, from_clause, dim_columns)
+        _record_refresh_watermark(con, m, from_clause)
+        return
+
+    last_watermark = state_row[0]
+    # Cutoff expression: last_refresh_watermark - INTERVAL grace_seconds.
+    # V1 assumes watermark_column is TIMESTAMP-compatible. For BIGINT
+    # watermarks, set grace_seconds=0 (subtraction skipped).
+    if grace > 0:
+        cutoff_expr = (
+            f"(CAST(? AS TIMESTAMP) - INTERVAL '{int(grace)}' SECOND)"
+        )
+    else:
+        cutoff_expr = "CAST(? AS TIMESTAMP)"
+
+    wm_col = qident(m.watermark_column)
+    metric_expr = _metric_expr_with_filter(m)
+
+    # The DELETE+INSERT runs in a transaction so a failure mid-flight
+    # doesn't leave the materialized table half-populated.
+    con.execute("BEGIN")
+    try:
+        if not dim_columns:
+            # Scalar incremental is rejected at validation -- the path
+            # below assumes at least one dim. Defensive: full rebuild
+            # if somehow reached.
+            _materialize_full(con, m, from_clause, dim_columns)
+        else:
+            dim_col_list = ", ".join(qident(col) for _, col in dim_columns)
+            dim_alias_list = ", ".join(qident(dim_id) for dim_id, _ in dim_columns)
+
+            # DELETE: rows in the materialized table for any dim-tuple
+            # touched by the incremental window.
+            delete_sql = (
+                f"DELETE FROM {qident(mat_table)} "
+                f"WHERE ({dim_alias_list}) IN ("
+                f"  SELECT DISTINCT {dim_col_list} FROM {from_clause} "
+                f"  WHERE {wm_col} > {cutoff_expr}"
+                f")"
+            )
+            con.execute(delete_sql, [last_watermark])
+
+            # INSERT: re-aggregate the FULL source for any dim-tuple
+            # touched by the window. Without this "full re-aggregate"
+            # we'd lose contributions from rows outside the window.
+            select_parts = [
+                f"{qident(col)} AS {qident(dim_id)}"
+                for dim_id, col in dim_columns
+            ]
+            select_parts.append(f"{metric_expr} AS {qident(m.id)}")
+            group_by = ", ".join(str(i + 1) for i in range(len(dim_columns)))
+            insert_sql = (
+                f"INSERT INTO {qident(mat_table)} "
+                f"SELECT " + ", ".join(select_parts) + " "
+                f"FROM {from_clause} "
+                f"WHERE ({dim_col_list}) IN ("
+                f"  SELECT DISTINCT {dim_col_list} FROM {from_clause} "
+                f"  WHERE {wm_col} > {cutoff_expr}"
+                f") "
+                f"GROUP BY {group_by}"
+            )
+            con.execute(insert_sql, [last_watermark])
+
+        _record_refresh_watermark(con, m, from_clause)
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
+
+def _record_refresh_watermark(
+    con: duckdb.DuckDBPyConnection, m: MetricConfig, from_clause: str,
+) -> None:
+    """Record the source's current MAX(watermark_column) as the
+    last_refresh_watermark for this metric. Called after every
+    incremental pass (and after a forced-full backfill)."""
+    from gibran._sql import qident
+
+    assert m.watermark_column is not None
+    wm_col = qident(m.watermark_column)
+    row = con.execute(
+        f"SELECT CAST(MAX({wm_col}) AS VARCHAR) FROM {from_clause}"
+    ).fetchone()
+    new_watermark = row[0] if row else None
+    con.execute(
+        "INSERT INTO gibran_mat_state "
+        "(metric_id, last_refresh_watermark, last_refresh_at) "
+        "VALUES (?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT (metric_id) DO UPDATE SET "
+        "  last_refresh_watermark = EXCLUDED.last_refresh_watermark, "
+        "  last_refresh_at = EXCLUDED.last_refresh_at",
+        [m.id, new_watermark],
+    )
 
 
 def _upsert_source(con: duckdb.DuckDBPyConnection, s: SourceConfig) -> None:
