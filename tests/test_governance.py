@@ -84,7 +84,11 @@ class TestPreviewSchema:
         order_count = next(m for m in schema.metrics if m.metric_id == "order_count")
         assert order_count.depends_on == ()
 
-    def test_example_values_never_populated_in_v1(self) -> None:
+    def test_example_values_stay_none_when_sampling_not_run(self) -> None:
+        # `_populated_db` only runs apply_config; it does NOT call
+        # populate_example_values, so the column stays NULL even for
+        # public columns. The CLI's `gibran sync` is what triggers
+        # sampling. Test_example_values.py covers the sampling path.
         gov = DefaultGovernance(_populated_db())
         schema = gov.preview_schema(_ident("analyst_west", region="west"), "orders")
         for col in schema.columns:

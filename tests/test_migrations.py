@@ -11,7 +11,7 @@ MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 def test_migrations_apply_clean() -> None:
     con = duckdb.connect(":memory:")
     applied = apply_all(con, MIGRATIONS_DIR)
-    assert applied == [1, 2, 3, 4, 5, 6, 7]
+    assert applied == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_metric_config_column_exists() -> None:
@@ -37,6 +37,19 @@ def test_valid_until_column_exists_and_nullable() -> None:
     assert row is not None, "valid_until column should exist on gibran_policies"
     assert row[0].upper().startswith("TIMESTAMP")
     assert row[1] == "YES"  # nullable -- NULL means "never expires"
+
+
+def test_example_values_column_exists_and_nullable() -> None:
+    con = duckdb.connect(":memory:")
+    apply_all(con, MIGRATIONS_DIR)
+    row = con.execute(
+        "SELECT data_type, is_nullable FROM information_schema.columns "
+        "WHERE table_name = 'gibran_columns' AND column_name = 'example_values'"
+    ).fetchone()
+    assert row is not None
+    # DuckDB renders JSON as "JSON"; column is nullable (NULL = not sampled).
+    assert row[0].upper() in ("JSON", "VARCHAR", "TEXT")
+    assert row[1] == "YES"
 
 
 def test_source_health_table_exists() -> None:

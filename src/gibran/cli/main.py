@@ -340,6 +340,17 @@ def sync(
                 err=True,
             )
         counts = apply_config(con, validated)
+        # Populate example_values for low-cardinality public columns.
+        # Runs AFTER apply so the gibran_columns rows exist to UPDATE.
+        # Skipped sources don't fail the sync -- the example-value pass
+        # is opportunistic, not a correctness gate.
+        from gibran.sync.example_values import populate_example_values
+        samples = populate_example_values(con, validated.config)
+        sampled_count = sum(1 for r in samples if r.status == "sampled")
+        if sampled_count:
+            typer.echo(
+                f"sampled example_values for {sampled_count} public column(s)"
+            )
     finally:
         con.close()
     typer.echo(f"applied: {counts}")

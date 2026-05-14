@@ -268,22 +268,37 @@ class DefaultGovernance:
         self, source_id: str, allowed: frozenset[str]
     ) -> tuple[ColumnView, ...]:
         rows = self.con.execute(
-            "SELECT column_name, data_type, sensitivity, description "
+            "SELECT column_name, data_type, sensitivity, description, "
+            "example_values "
             "FROM gibran_columns WHERE source_id = ? ORDER BY column_name",
             [source_id],
         ).fetchall()
-        return tuple(
-            ColumnView(
+        views: list[ColumnView] = []
+        for name, data_type, sensitivity, description, ex_json in rows:
+            if name not in allowed:
+                continue
+            example_values: tuple[str, ...] | None = None
+            if ex_json is not None:
+                try:
+                    parsed = json.loads(ex_json)
+                    if isinstance(parsed, list):
+                        # Tuple of strings for the contract; preserve None as
+                        # the literal string "null" so the rendering layer
+                        # can spot it. Numeric/bool values get str()'d.
+                        example_values = tuple(
+                            "null" if v is None else str(v) for v in parsed
+                        )
+                except (ValueError, TypeError):
+                    example_values = None
+            views.append(ColumnView(
                 name=name,
                 display_name=name,
                 data_type=data_type,
                 sensitivity=sensitivity,
                 description=description,
-                example_values=None,  # V1: never populate; defer to NL pipeline integration
-            )
-            for name, data_type, sensitivity, description in rows
-            if name in allowed
-        )
+                example_values=example_values,
+            ))
+        return tuple(views)
 
     def _build_dimension_views(
         self, source_id: str, allowed: frozenset[str]
