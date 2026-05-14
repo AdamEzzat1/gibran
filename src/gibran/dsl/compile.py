@@ -214,36 +214,24 @@ def compile_intent(intent: QueryIntent, catalog: Catalog) -> CompiledQuery:
         if mat_dims == intent_dim_ids and all(d.grain is None for d in intent.dimensions):
             return _build_materialized_select(metric_metas[0], intent)
 
-    # Shape-primitives short-circuit: cohort_retention, funnel, and
-    # multi_stage_filter are whole-query primitives that emit a fixed
-    # column shape via CTEs. They cannot be combined with other metrics
-    # or with intent.dimensions (the dsl validator enforces those
-    # preconditions; we double-check).
+    # Shape-primitives short-circuit: cohort_retention, funnel,
+    # multi_stage_filter, and any future user-declared shape primitive
+    # route through the registry below. Each emits a fixed column shape
+    # via CTEs and cannot be combined with other metrics or dimensions.
+    # The dsl validator already enforces the preconditions; we keep a
+    # defensive double-check here in case a caller compiles an
+    # unvalidated intent (the historical contract).
     for meta in metric_metas:
-        if meta.metric_type == "cohort_retention":
-            if len(metric_metas) != 1 or intent.dimensions:
-                raise CompileError(
-                    f"cohort_retention metric {meta.metric_id!r} must be the "
-                    f"only metric in the intent and intent.dimensions must "
-                    f"be empty"
-                )
-            return _build_cohort_retention(meta, from_relation, intent)
-        if meta.metric_type == "funnel":
-            if len(metric_metas) != 1 or intent.dimensions:
-                raise CompileError(
-                    f"funnel metric {meta.metric_id!r} must be the only "
-                    f"metric in the intent and intent.dimensions must be "
-                    f"empty"
-                )
-            return _build_funnel(meta, from_relation, intent)
-        if meta.metric_type == "multi_stage_filter":
-            if len(metric_metas) != 1 or intent.dimensions:
-                raise CompileError(
-                    f"multi_stage_filter metric {meta.metric_id!r} must be "
-                    f"the only metric in the intent and intent.dimensions "
-                    f"must be empty"
-                )
-            return _build_multi_stage_filter(meta, from_relation, intent)
+        primitive = SHAPE_PRIMITIVES.get(meta.metric_type)
+        if primitive is None:
+            continue
+        if len(metric_metas) != 1 or intent.dimensions:
+            raise CompileError(
+                f"{meta.metric_type} metric {meta.metric_id!r} must be the "
+                f"only metric in the intent and intent.dimensions must be "
+                f"empty"
+            )
+        return primitive.build(meta, intent, from_relation)
     dim_metas = [
         (dim, catalog.get_dimension(dim.id)) for dim in intent.dimensions
     ]
