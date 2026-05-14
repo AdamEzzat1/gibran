@@ -4,7 +4,7 @@ Three layers:
   1. `redact_sql_literals` -- pure function over sqlglot AST.
   2. `redact_intent_literals` -- pure function over DSL intent JSON.
   3. End-to-end through `run_sql_query` and `run_dsl_query`, verifying
-     that what lands in `rumi_query_log` has no leaked literals.
+     that what lands in `gibran_query_log` has no leaked literals.
 
 The fixture YAML already ships with `customer_email` classified as
 `pii`; we reuse it everywhere instead of constructing synthetic state.
@@ -16,19 +16,19 @@ from pathlib import Path
 
 import duckdb
 
-from rumi.dsl.run import run_dsl_query
-from rumi.execution.sql import run_sql_query
-from rumi.governance.default import DefaultGovernance
-from rumi.governance.redaction import (
+from gibran.dsl.run import run_dsl_query
+from gibran.execution.sql import run_sql_query
+from gibran.governance.default import DefaultGovernance
+from gibran.governance.redaction import (
     lookup_sensitive_columns,
     redact_audit_payload,
     redact_intent_literals,
     redact_sql_literals,
 )
-from rumi.governance.types import IdentityContext
-from rumi.sync.applier import apply as apply_config
-from rumi.sync.loader import load as load_config
-from rumi.sync.migrations import apply_all as apply_migrations
+from gibran.governance.types import IdentityContext
+from gibran.sync.applier import apply as apply_config
+from gibran.sync.loader import load as load_config
+from gibran.sync.migrations import apply_all as apply_migrations
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -38,7 +38,7 @@ MIGRATIONS = Path(__file__).parent.parent / "migrations"
 def _populated_db() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(":memory:")
     apply_migrations(con, MIGRATIONS)
-    apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+    apply_config(con, load_config(FIXTURES / "gibran.yaml"))
     # Provision a real `orders` table so run_sql_query / run_dsl_query
     # execute end-to-end (governance accepts duckdb_table sources by
     # relation name).
@@ -65,9 +65,9 @@ def _admin_identity() -> IdentityContext:
 def _admin_policy(con: duckdb.DuckDBPyConnection) -> None:
     # Allow-everything policy for the admin role so raw-SQL paths can
     # touch customer_email without triggering COLUMN_DENIED.
-    con.execute("INSERT INTO rumi_roles VALUES ('admin', 'Admin')")
+    con.execute("INSERT INTO gibran_roles VALUES ('admin', 'Admin')")
     con.execute(
-        "INSERT INTO rumi_policies (policy_id, role_id, source_id, default_column_mode) "
+        "INSERT INTO gibran_policies (policy_id, role_id, source_id, default_column_mode) "
         "VALUES ('admin_orders', 'admin', 'orders', 'allow')"
     )
 
@@ -298,7 +298,7 @@ class TestRawSqlAuditRedaction:
         )
         assert result.status == "ok"
         stored = con.execute(
-            "SELECT generated_sql FROM rumi_query_log WHERE query_id = ?",
+            "SELECT generated_sql FROM gibran_query_log WHERE query_id = ?",
             [result.query_id],
         ).fetchone()[0]
         assert "alice@x.com" not in stored
@@ -319,7 +319,7 @@ class TestRawSqlAuditRedaction:
         )
         assert result.status == "denied"
         stored = con.execute(
-            "SELECT generated_sql FROM rumi_query_log WHERE query_id = ?",
+            "SELECT generated_sql FROM gibran_query_log WHERE query_id = ?",
             [result.query_id],
         ).fetchone()[0]
         assert "alice@x.com" not in stored
@@ -334,7 +334,7 @@ class TestRawSqlAuditRedaction:
         )
         assert result.status == "ok"
         stored = con.execute(
-            "SELECT generated_sql FROM rumi_query_log WHERE query_id = ?",
+            "SELECT generated_sql FROM gibran_query_log WHERE query_id = ?",
             [result.query_id],
         ).fetchone()[0]
         # `amount > 5` should appear in some form (sqlglot may reformat)
@@ -372,7 +372,7 @@ class TestDslAuditRedaction:
         # Validation should have rejected it before SQL emission.
         assert result.pre_compile_error is not None
         stored = con.execute(
-            "SELECT nl_prompt FROM rumi_query_log WHERE query_id = ?",
+            "SELECT nl_prompt FROM gibran_query_log WHERE query_id = ?",
             [result.query_id],
         ).fetchone()[0]
         assert "alice@x.com" not in stored
@@ -400,7 +400,7 @@ class TestDslAuditRedaction:
         # The DSL compiler should produce SQL; whether it executes is
         # secondary -- the audit row is what we care about.
         stored = con.execute(
-            "SELECT nl_prompt, generated_sql FROM rumi_query_log "
+            "SELECT nl_prompt, generated_sql FROM gibran_query_log "
             "WHERE query_id = ?",
             [result.query_id],
         ).fetchone()
@@ -419,7 +419,7 @@ class TestRedactAuditPayload:
         # input untouched (no DB lookup overhead matters here).
         con = duckdb.connect(":memory:")
         apply_migrations(con, MIGRATIONS)
-        # Don't sync any sources -> rumi_columns is empty.
+        # Don't sync any sources -> gibran_columns is empty.
         sql_in = "SELECT * FROM x WHERE email = 'a@x.com'"
         intent_in = '{"source":"x","filters":[{"op":"eq","column":"email","value":"a"}]}'
         sql_out, intent_out = redact_audit_payload(con, None, sql_in, intent_in)

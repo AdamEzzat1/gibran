@@ -1,7 +1,7 @@
 import pytest
 
-from rumi.governance.ast import ASTValidationError
-from rumi.governance.ast import validate_policy_ast as validate
+from gibran.governance.ast import ASTValidationError
+from gibran.governance.ast import validate_policy_ast as validate
 
 KNOWN_COLS = frozenset({"region", "tier", "amount", "status"})
 

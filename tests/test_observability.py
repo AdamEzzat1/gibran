@@ -12,11 +12,11 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from rumi.observability.default import DefaultObservability
-from rumi.observability.types import resolve_staleness_seconds
-from rumi.sync.applier import apply as apply_config
-from rumi.sync.loader import load as load_config
-from rumi.sync.migrations import apply_all as apply_migrations
+from gibran.observability.default import DefaultObservability
+from gibran.observability.types import resolve_staleness_seconds
+from gibran.sync.applier import apply as apply_config
+from gibran.sync.loader import load as load_config
+from gibran.sync.migrations import apply_all as apply_migrations
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -26,7 +26,7 @@ MIGRATIONS = Path(__file__).parent.parent / "migrations"
 def _populated_db() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(":memory:")
     apply_migrations(con, MIGRATIONS)
-    apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+    apply_config(con, load_config(FIXTURES / "gibran.yaml"))
     return con
 
 
@@ -91,7 +91,7 @@ class TestLatestBlockingFailures:
         # Insert a stale freshness run using DuckDB's own clock (avoids
         # Python/DuckDB timezone drift in the comparison)
         con.execute(
-            "INSERT INTO rumi_quality_runs "
+            "INSERT INTO gibran_quality_runs "
             "(run_id, rule_id, rule_kind, passed, ran_at) "
             "VALUES ('stale1', 'orders_freshness_24h', 'freshness', TRUE, "
             "now() - INTERVAL '2 hours')"
@@ -122,7 +122,7 @@ class TestLatestBlockingFailures:
         obs = DefaultObservability(con)
         # Disable the blocking quality rule
         con.execute(
-            "UPDATE rumi_quality_rules SET enabled = FALSE "
+            "UPDATE gibran_quality_rules SET enabled = FALSE "
             "WHERE rule_id = 'orders_amount_not_null'"
         )
         # Pass freshness so only the now-disabled quality rule could block
@@ -138,12 +138,12 @@ class TestLatestBlockingFailures:
         obs.record_run("orders_amount_not_null", "quality", True)
         # Override freshness staleness to 60 seconds
         con.execute(
-            "UPDATE rumi_freshness_rules SET staleness_seconds = 60 "
+            "UPDATE gibran_freshness_rules SET staleness_seconds = 60 "
             "WHERE rule_id = 'orders_freshness_24h'"
         )
         # Insert a freshness run from 90s ago (stale by override, not by default 300s)
         con.execute(
-            "INSERT INTO rumi_quality_runs "
+            "INSERT INTO gibran_quality_runs "
             "(run_id, rule_id, rule_kind, passed, ran_at) "
             "VALUES ('o1', 'orders_freshness_24h', 'freshness', TRUE, "
             "now() - INTERVAL '90 seconds')"
@@ -171,7 +171,7 @@ class TestRecordRun:
         run_id_b = obs.record_run("orders_amount_not_null", "quality", True)
         assert run_id_a != run_id_b
         rows = con.execute(
-            "SELECT rule_id, passed FROM rumi_quality_runs "
+            "SELECT rule_id, passed FROM gibran_quality_runs "
             "WHERE rule_id = 'orders_amount_not_null'"
         ).fetchall()
         assert len(rows) == 2
@@ -184,7 +184,7 @@ class TestRecordRun:
             observed_value={"null_count": 17, "checked_rows": 1000},
         )
         ov = con.execute(
-            "SELECT CAST(observed_value AS VARCHAR) FROM rumi_quality_runs "
+            "SELECT CAST(observed_value AS VARCHAR) FROM gibran_quality_runs "
             "WHERE rule_id = 'orders_amount_not_null'"
         ).fetchone()[0]
         assert "null_count" in ov

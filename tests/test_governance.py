@@ -5,12 +5,12 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from rumi.governance.default import DefaultGovernance
-from rumi.governance.types import DenyReason, IdentityContext
-from rumi.observability.default import DefaultObservability
-from rumi.sync.applier import apply as apply_config
-from rumi.sync.loader import load as load_config
-from rumi.sync.migrations import apply_all as apply_migrations
+from gibran.governance.default import DefaultGovernance
+from gibran.governance.types import DenyReason, IdentityContext
+from gibran.observability.default import DefaultObservability
+from gibran.sync.applier import apply as apply_config
+from gibran.sync.loader import load as load_config
+from gibran.sync.migrations import apply_all as apply_migrations
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -20,7 +20,7 @@ MIGRATIONS = Path(__file__).parent.parent / "migrations"
 def _populated_db() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(":memory:")
     apply_migrations(con, MIGRATIONS)
-    apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+    apply_config(con, load_config(FIXTURES / "gibran.yaml"))
     return con
 
 
@@ -188,9 +188,9 @@ class TestEvaluate:
         # Construct a synthetic policy with no row_filter to check this path
         con = _populated_db()
         # Add a role + policy without a row_filter
-        con.execute("INSERT INTO rumi_roles VALUES ('admin', 'Admin')")
+        con.execute("INSERT INTO gibran_roles VALUES ('admin', 'Admin')")
         con.execute(
-            "INSERT INTO rumi_policies (policy_id, role_id, source_id, default_column_mode) "
+            "INSERT INTO gibran_policies (policy_id, role_id, source_id, default_column_mode) "
             "VALUES ('admin_orders', 'admin', 'orders', 'allow')"
         )
         gov = DefaultGovernance(con)
@@ -299,10 +299,10 @@ class TestEvaluateWithObservability:
         con, obs = _populated_with_passing_health()
         # Replace the fresh freshness run with a stale one (default window 300s)
         con.execute(
-            "DELETE FROM rumi_quality_runs WHERE rule_id = 'orders_freshness_24h'"
+            "DELETE FROM gibran_quality_runs WHERE rule_id = 'orders_freshness_24h'"
         )
         con.execute(
-            "INSERT INTO rumi_quality_runs "
+            "INSERT INTO gibran_quality_runs "
             "(run_id, rule_id, rule_kind, passed, ran_at) "
             "VALUES ('stale1', 'orders_freshness_24h', 'freshness', TRUE, "
             "now() - INTERVAL '2 hours')"
@@ -384,7 +384,7 @@ class TestTimeBoundPolicies:
 
     def _set_valid_until(self, con: duckdb.DuckDBPyConnection, dt: datetime | None) -> None:
         con.execute(
-            "UPDATE rumi_policies SET valid_until = ? WHERE policy_id = 'analyst_west_orders'",
+            "UPDATE gibran_policies SET valid_until = ? WHERE policy_id = 'analyst_west_orders'",
             [dt],
         )
 
@@ -423,7 +423,7 @@ class TestTimeBoundPolicies:
         # The fixture policy ships with valid_until NULL; explicit baseline.
         con = _populated_db()
         valid_until = con.execute(
-            "SELECT valid_until FROM rumi_policies WHERE policy_id = 'analyst_west_orders'"
+            "SELECT valid_until FROM gibran_policies WHERE policy_id = 'analyst_west_orders'"
         ).fetchone()[0]
         assert valid_until is None
         gov = DefaultGovernance(con)

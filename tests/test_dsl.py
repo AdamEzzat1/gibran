@@ -5,16 +5,16 @@ import duckdb
 import pytest
 from pydantic import ValidationError
 
-from rumi.dsl.compile import Catalog, CompileError, compile_intent
-from rumi.dsl.run import run_dsl_query
-from rumi.dsl.types import DimensionRef, HavingClause, OrderBy, QueryIntent
-from rumi.dsl.validate import IntentValidationError, validate_intent
-from rumi.governance.default import DefaultGovernance
-from rumi.governance.types import DenyReason, IdentityContext
-from rumi.observability.default import DefaultObservability
-from rumi.sync.applier import apply as apply_config
-from rumi.sync.loader import load as load_config
-from rumi.sync.migrations import apply_all as apply_migrations
+from gibran.dsl.compile import Catalog, CompileError, compile_intent
+from gibran.dsl.run import run_dsl_query
+from gibran.dsl.types import DimensionRef, HavingClause, OrderBy, QueryIntent
+from gibran.dsl.validate import IntentValidationError, validate_intent
+from gibran.governance.default import DefaultGovernance
+from gibran.governance.types import DenyReason, IdentityContext
+from gibran.observability.default import DefaultObservability
+from gibran.sync.applier import apply as apply_config
+from gibran.sync.loader import load as load_config
+from gibran.sync.migrations import apply_all as apply_migrations
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -24,7 +24,7 @@ MIGRATIONS = Path(__file__).parent.parent / "migrations"
 def _populated_db_with_data() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(":memory:")
     apply_migrations(con, MIGRATIONS)
-    apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+    apply_config(con, load_config(FIXTURES / "gibran.yaml"))
     con.execute(
         "CREATE TABLE orders ("
         "order_id VARCHAR, amount DECIMAL(18,2), order_date TIMESTAMP, "
@@ -367,7 +367,7 @@ class TestRunDSLQuery:
             {"source": "orders", "metrics": ["gross_revenue"]},
         )
         row = con.execute(
-            "SELECT nl_prompt, status FROM rumi_query_log WHERE query_id = ?",
+            "SELECT nl_prompt, status FROM gibran_query_log WHERE query_id = ?",
             [result.query_result.query_id],
         ).fetchone()
         assert row[1] == "ok"
@@ -384,7 +384,7 @@ class TestRunDSLQuery:
         )
         row = con.execute(
             "SELECT status, deny_reason, generated_sql, nl_prompt "
-            "FROM rumi_query_log WHERE query_id = ?",
+            "FROM gibran_query_log WHERE query_id = ?",
             [result.query_id],
         ).fetchone()
         assert row[0] == "error"
@@ -495,12 +495,12 @@ class TestExpressionMetricTemplate:
         con = _populated_db_with_data()
         # Manually insert a self-referencing expression metric
         con.execute(
-            "INSERT INTO rumi_metrics "
+            "INSERT INTO gibran_metrics "
             "(metric_id, source_id, display_name, metric_type, current_version) "
             "VALUES ('self_ref', 'orders', 'Self Ref', 'expression', 1)"
         )
         con.execute(
-            "INSERT INTO rumi_metric_versions "
+            "INSERT INTO gibran_metric_versions "
             "(metric_id, version, expression) "
             "VALUES ('self_ref', 1, '{self_ref} + 1')"
         )
@@ -524,7 +524,7 @@ class TestExpressionMetricTemplate:
 class TestHavingValidation:
     def test_having_metric_must_be_in_intent_metrics(self) -> None:
         con = _populated_db_with_data()
-        from rumi.governance.default import DefaultGovernance
+        from gibran.governance.default import DefaultGovernance
         gov = DefaultGovernance(con, observability=DefaultObservability(con))
         schema = gov.preview_schema(_ident("analyst_west", region="west"), "orders")
 
@@ -602,7 +602,7 @@ class TestHavingCompilation:
     def test_having_through_runner_with_governance(self) -> None:
         """End-to-end: HAVING combined with governance row filter."""
         con = _populated_db_with_data()
-        from rumi.governance.default import DefaultGovernance
+        from gibran.governance.default import DefaultGovernance
         gov = DefaultGovernance(con, observability=DefaultObservability(con))
         # analyst_west sees only west rows. After grouping, only {west: 100}
         # exists. HAVING > 50 keeps it. HAVING > 200 drops it.
@@ -635,7 +635,7 @@ class TestHavingCompilation:
 
 class TestPercentileMetric:
     def test_percentile_pydantic_requires_column_and_p(self) -> None:
-        from rumi.sync.yaml_schema import MetricConfig
+        from gibran.sync.yaml_schema import MetricConfig
         with pytest.raises(ValidationError, match="percentile requires"):
             MetricConfig.model_validate({
                 "id": "x", "source": "orders", "display_name": "X",
@@ -643,7 +643,7 @@ class TestPercentileMetric:
             })
 
     def test_percentile_pydantic_rejects_p_outside_unit_interval(self) -> None:
-        from rumi.sync.yaml_schema import MetricConfig
+        from gibran.sync.yaml_schema import MetricConfig
         for bad in (0, 1, 1.5, -0.1):
             with pytest.raises(ValidationError, match="must be in"):
                 MetricConfig.model_validate({
@@ -688,7 +688,7 @@ class TestPercentileMetric:
 
     def test_percentile_through_runner_with_governance(self) -> None:
         con = _populated_db_with_data()
-        from rumi.governance.default import DefaultGovernance
+        from gibran.governance.default import DefaultGovernance
         gov = DefaultGovernance(con, observability=DefaultObservability(con))
         result = run_dsl_query(
             con, gov, _ident("analyst_west", region="west"),
@@ -705,7 +705,7 @@ class TestPercentileMetric:
 
 class TestRollingWindowMetric:
     def test_rolling_window_pydantic_requires_all_fields(self) -> None:
-        from rumi.sync.yaml_schema import MetricConfig
+        from gibran.sync.yaml_schema import MetricConfig
         with pytest.raises(ValidationError, match="rolling_window requires"):
             MetricConfig.model_validate({
                 "id": "x", "source": "orders", "display_name": "X",
@@ -743,7 +743,7 @@ class TestRollingWindowMetric:
     def test_rolling_window_forbids_dimensions(self) -> None:
         """rolling_window + dimensions is a V1 validation error."""
         con = _populated_db_with_data()
-        from rumi.governance.default import DefaultGovernance
+        from gibran.governance.default import DefaultGovernance
         gov = DefaultGovernance(con, observability=DefaultObservability(con))
         result = run_dsl_query(
             con, gov, _ident("analyst_west", region="west"),
@@ -759,7 +759,7 @@ class TestRollingWindowMetric:
 
     def test_rolling_window_through_runner(self) -> None:
         con = _populated_db_with_data()
-        from rumi.governance.default import DefaultGovernance
+        from gibran.governance.default import DefaultGovernance
         gov = DefaultGovernance(con, observability=DefaultObservability(con))
         result = run_dsl_query(
             con, gov, _ident("analyst_west", region="west"),

@@ -1,8 +1,8 @@
 import duckdb
 import pytest
 
-from rumi.governance.ast import compile_policy_to_sql as compile_to_sql
-from rumi.governance.types import IdentityContext
+from gibran.governance.ast import compile_policy_to_sql as compile_to_sql
+from gibran.governance.types import IdentityContext
 
 
 def _ident(**attrs: str) -> IdentityContext:

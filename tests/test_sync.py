@@ -4,14 +4,14 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from rumi.sync.applier import apply as apply_config
-from rumi.sync.loader import (
+from gibran.sync.applier import apply as apply_config
+from gibran.sync.loader import (
     ConfigValidationError,
     load as load_config,
     resolve_cost_class,
 )
-from rumi.sync.migrations import apply_all as apply_migrations
-from rumi.sync.yaml_schema import QualityRuleConfig
+from gibran.sync.migrations import apply_all as apply_migrations
+from gibran.sync.yaml_schema import QualityRuleConfig
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -25,7 +25,7 @@ def _migrated_db() -> duckdb.DuckDBPyConnection:
 
 
 def test_loads_valid_yaml() -> None:
-    validated = load_config(FIXTURES / "rumi.yaml")
+    validated = load_config(FIXTURES / "gibran.yaml")
     assert {s.id for s in validated.config.sources} == {"orders"}
     assert {m.id for m in validated.config.metrics} == {
         "order_count",
@@ -59,7 +59,7 @@ def test_loads_valid_yaml() -> None:
 
 def test_apply_populates_catalog_and_governance() -> None:
     con = _migrated_db()
-    validated = load_config(FIXTURES / "rumi.yaml")
+    validated = load_config(FIXTURES / "gibran.yaml")
     counts = apply_config(con, validated)
 
     assert counts == {
@@ -67,9 +67,9 @@ def test_apply_populates_catalog_and_governance() -> None:
         "roles": 2, "policies": 2, "quality_rules": 2, "freshness_rules": 1,
     }
 
-    assert [r[0] for r in con.execute("SELECT source_id FROM rumi_sources").fetchall()] == ["orders"]
+    assert [r[0] for r in con.execute("SELECT source_id FROM gibran_sources").fetchall()] == ["orders"]
     assert sorted(
-        r[0] for r in con.execute("SELECT metric_id FROM rumi_metrics").fetchall()
+        r[0] for r in con.execute("SELECT metric_id FROM gibran_metrics").fetchall()
     ) == [
         "avg_order_value", "gross_revenue", "order_count",
         "p95_amount", "revenue_7d_rolling", "revenue_mom",
@@ -79,7 +79,7 @@ def test_apply_populates_catalog_and_governance() -> None:
     deps = {
         (r[0], r[1])
         for r in con.execute(
-            "SELECT metric_id, depends_on_id FROM rumi_metric_dependencies"
+            "SELECT metric_id, depends_on_id FROM gibran_metric_dependencies"
         ).fetchall()
     }
     assert deps == {
@@ -91,7 +91,7 @@ def test_apply_populates_catalog_and_governance() -> None:
     versions = {
         r[0]: r[1]
         for r in con.execute(
-            "SELECT metric_id, expression FROM rumi_metric_versions "
+            "SELECT metric_id, expression FROM gibran_metric_versions "
             "WHERE effective_to IS NULL"
         ).fetchall()
     }
@@ -100,7 +100,7 @@ def test_apply_populates_catalog_and_governance() -> None:
     assert versions["avg_order_value"] == "{gross_revenue}/{order_count}"
 
     pii = con.execute(
-        "SELECT sensitivity FROM rumi_columns "
+        "SELECT sensitivity FROM gibran_columns "
         "WHERE source_id = 'orders' AND column_name = 'customer_email'"
     ).fetchone()[0]
     assert pii == "pii"
@@ -108,29 +108,29 @@ def test_apply_populates_catalog_and_governance() -> None:
 
 def test_apply_idempotent() -> None:
     con = _migrated_db()
-    validated = load_config(FIXTURES / "rumi.yaml")
+    validated = load_config(FIXTURES / "gibran.yaml")
     apply_config(con, validated)
     apply_config(con, validated)
-    assert con.execute("SELECT COUNT(*) FROM rumi_metric_versions").fetchone()[0] == 7
-    assert con.execute("SELECT COUNT(*) FROM rumi_metrics").fetchone()[0] == 7
+    assert con.execute("SELECT COUNT(*) FROM gibran_metric_versions").fetchone()[0] == 7
+    assert con.execute("SELECT COUNT(*) FROM gibran_metrics").fetchone()[0] == 7
     # avg_order_value (ratio) declares 2 deps; revenue_mom (period_over_period)
     # declares 1 dep on its base_metric (gross_revenue); revenue_per_paid_order
     # (expression) deps are not tracked in V1 (loader only extracts deps for
     # ratio and period_over_period metrics).
-    assert con.execute("SELECT COUNT(*) FROM rumi_metric_dependencies").fetchone()[0] == 3
-    assert con.execute("SELECT COUNT(*) FROM rumi_roles").fetchone()[0] == 2
-    assert con.execute("SELECT COUNT(*) FROM rumi_role_attributes").fetchone()[0] == 1
-    assert con.execute("SELECT COUNT(*) FROM rumi_policies").fetchone()[0] == 2
-    assert con.execute("SELECT COUNT(*) FROM rumi_policy_columns").fetchone()[0] == 3
-    assert con.execute("SELECT COUNT(*) FROM rumi_quality_rules").fetchone()[0] == 2
-    assert con.execute("SELECT COUNT(*) FROM rumi_freshness_rules").fetchone()[0] == 1
+    assert con.execute("SELECT COUNT(*) FROM gibran_metric_dependencies").fetchone()[0] == 3
+    assert con.execute("SELECT COUNT(*) FROM gibran_roles").fetchone()[0] == 2
+    assert con.execute("SELECT COUNT(*) FROM gibran_role_attributes").fetchone()[0] == 1
+    assert con.execute("SELECT COUNT(*) FROM gibran_policies").fetchone()[0] == 2
+    assert con.execute("SELECT COUNT(*) FROM gibran_policy_columns").fetchone()[0] == 3
+    assert con.execute("SELECT COUNT(*) FROM gibran_quality_rules").fetchone()[0] == 2
+    assert con.execute("SELECT COUNT(*) FROM gibran_freshness_rules").fetchone()[0] == 1
 
 
 def test_apply_bumps_metric_version_on_expression_change(tmp_path: Path) -> None:
     con = _migrated_db()
-    yaml_path = tmp_path / "rumi.yaml"
+    yaml_path = tmp_path / "gibran.yaml"
     yaml_path.write_text(
-        (FIXTURES / "rumi.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+        (FIXTURES / "gibran.yaml").read_text(encoding="utf-8"), encoding="utf-8"
     )
     apply_config(con, load_config(yaml_path))
 
@@ -140,7 +140,7 @@ def test_apply_bumps_metric_version_on_expression_change(tmp_path: Path) -> None
     apply_config(con, load_config(yaml_path))
 
     versions = con.execute(
-        "SELECT version, expression, effective_to FROM rumi_metric_versions "
+        "SELECT version, expression, effective_to FROM gibran_metric_versions "
         "WHERE metric_id = 'gross_revenue' ORDER BY version"
     ).fetchall()
     assert len(versions) == 2
@@ -148,7 +148,7 @@ def test_apply_bumps_metric_version_on_expression_change(tmp_path: Path) -> None
     assert versions[1][2] is None
     assert versions[1][1] == "SUM(amount * 1.0)"
     current_v = con.execute(
-        "SELECT current_version FROM rumi_metrics WHERE metric_id = 'gross_revenue'"
+        "SELECT current_version FROM gibran_metrics WHERE metric_id = 'gross_revenue'"
     ).fetchone()[0]
     assert current_v == 2
 
@@ -156,12 +156,12 @@ def test_apply_bumps_metric_version_on_expression_change(tmp_path: Path) -> None
 class TestGovernanceEntities:
     def test_roles_and_attributes_persist(self) -> None:
         con = _migrated_db()
-        apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+        apply_config(con, load_config(FIXTURES / "gibran.yaml"))
 
         roles = {
             r[0]: r[1]
             for r in con.execute(
-                "SELECT role_id, display_name FROM rumi_roles"
+                "SELECT role_id, display_name FROM gibran_roles"
             ).fetchall()
         }
         assert roles == {
@@ -172,18 +172,18 @@ class TestGovernanceEntities:
         attrs = {
             (r[0], r[1]): r[2]
             for r in con.execute(
-                "SELECT role_id, attribute_key, attribute_value FROM rumi_role_attributes"
+                "SELECT role_id, attribute_key, attribute_value FROM gibran_role_attributes"
             ).fetchall()
         }
         assert attrs == {("analyst_west", "region"): "west"}
 
     def test_policies_persist_with_row_filter_as_json(self) -> None:
         con = _migrated_db()
-        apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+        apply_config(con, load_config(FIXTURES / "gibran.yaml"))
 
         analyst = con.execute(
             "SELECT role_id, source_id, default_column_mode, "
-            "CAST(row_filter_ast AS VARCHAR) FROM rumi_policies "
+            "CAST(row_filter_ast AS VARCHAR) FROM gibran_policies "
             "WHERE policy_id = 'analyst_west_orders'"
         ).fetchone()
         assert analyst[0] == "analyst_west"
@@ -194,9 +194,9 @@ class TestGovernanceEntities:
 
     def test_policy_column_overrides_persist(self) -> None:
         con = _migrated_db()
-        apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+        apply_config(con, load_config(FIXTURES / "gibran.yaml"))
         rows = con.execute(
-            "SELECT column_name, granted FROM rumi_policy_columns "
+            "SELECT column_name, granted FROM gibran_policy_columns "
             "WHERE policy_id = 'external_partner_orders' "
             "ORDER BY column_name"
         ).fetchall()
@@ -209,22 +209,22 @@ class TestGovernanceEntities:
     def test_policy_valid_until_defaults_to_null(self) -> None:
         # The fixture YAML doesn't set valid_until on any policy.
         con = _migrated_db()
-        apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+        apply_config(con, load_config(FIXTURES / "gibran.yaml"))
         rows = con.execute(
-            "SELECT policy_id, valid_until FROM rumi_policies ORDER BY policy_id"
+            "SELECT policy_id, valid_until FROM gibran_policies ORDER BY policy_id"
         ).fetchall()
         for _policy_id, valid_until in rows:
             assert valid_until is None
 
     def test_policy_valid_until_round_trips(self, tmp_path: Path) -> None:
         # Author a YAML with one valid_until-bearing policy and confirm it
-        # round-trips into rumi_policies as a naive datetime.
+        # round-trips into gibran_policies as a naive datetime.
         from datetime import datetime
 
         con = _migrated_db()
-        yaml_path = tmp_path / "rumi.yaml"
+        yaml_path = tmp_path / "gibran.yaml"
         yaml_path.write_text(
-            (FIXTURES / "rumi.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+            (FIXTURES / "gibran.yaml").read_text(encoding="utf-8"), encoding="utf-8"
         )
         text = yaml_path.read_text(encoding="utf-8")
         # Inject valid_until on the analyst_west_orders policy.
@@ -238,7 +238,7 @@ class TestGovernanceEntities:
         apply_config(con, load_config(yaml_path))
 
         stored = con.execute(
-            "SELECT valid_until FROM rumi_policies WHERE policy_id = 'analyst_west_orders'"
+            "SELECT valid_until FROM gibran_policies WHERE policy_id = 'analyst_west_orders'"
         ).fetchone()[0]
         assert stored == datetime(2027, 1, 1, 0, 0, 0)
 
@@ -247,9 +247,9 @@ class TestGovernanceEntities:
         # not flap the row. We normalize tz-aware to naive UTC at write time
         # so the change-detection tuple round-trips equal.
         con = _migrated_db()
-        yaml_path = tmp_path / "rumi.yaml"
+        yaml_path = tmp_path / "gibran.yaml"
         yaml_path.write_text(
-            (FIXTURES / "rumi.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+            (FIXTURES / "gibran.yaml").read_text(encoding="utf-8"), encoding="utf-8"
         )
         text = yaml_path.read_text(encoding="utf-8").replace(
             "    default_column_mode: allow\n    row_filter:",
@@ -260,23 +260,23 @@ class TestGovernanceEntities:
         yaml_path.write_text(text, encoding="utf-8")
         apply_config(con, load_config(yaml_path))
         first = con.execute(
-            "SELECT valid_until FROM rumi_policies WHERE policy_id = 'analyst_west_orders'"
+            "SELECT valid_until FROM gibran_policies WHERE policy_id = 'analyst_west_orders'"
         ).fetchone()[0]
         # Re-apply -- value should be identical, no UPDATE needed.
         apply_config(con, load_config(yaml_path))
         second = con.execute(
-            "SELECT valid_until FROM rumi_policies WHERE policy_id = 'analyst_west_orders'"
+            "SELECT valid_until FROM gibran_policies WHERE policy_id = 'analyst_west_orders'"
         ).fetchone()[0]
         assert first == second
         assert first.tzinfo is None  # stored as naive UTC
 
     def test_quality_rules_resolve_cost_class_by_type(self) -> None:
         con = _migrated_db()
-        apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+        apply_config(con, load_config(FIXTURES / "gibran.yaml"))
         rules = {
             r[0]: r[1]
             for r in con.execute(
-                "SELECT rule_id, cost_class FROM rumi_quality_rules"
+                "SELECT rule_id, cost_class FROM gibran_quality_rules"
             ).fetchall()
         }
         assert rules == {
@@ -286,18 +286,18 @@ class TestGovernanceEntities:
 
     def test_freshness_rule_persists(self) -> None:
         con = _migrated_db()
-        apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+        apply_config(con, load_config(FIXTURES / "gibran.yaml"))
         row = con.execute(
             "SELECT source_id, watermark_column, max_age_seconds, severity "
-            "FROM rumi_freshness_rules WHERE rule_id = 'orders_freshness_24h'"
+            "FROM gibran_freshness_rules WHERE rule_id = 'orders_freshness_24h'"
         ).fetchone()
         assert row == ("orders", "order_date", 86400, "block")
 
     def test_role_attributes_replaced_on_resync(self, tmp_path: Path) -> None:
         con = _migrated_db()
-        yaml_path = tmp_path / "rumi.yaml"
+        yaml_path = tmp_path / "gibran.yaml"
         yaml_path.write_text(
-            (FIXTURES / "rumi.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+            (FIXTURES / "gibran.yaml").read_text(encoding="utf-8"), encoding="utf-8"
         )
         apply_config(con, load_config(yaml_path))
 
@@ -308,22 +308,22 @@ class TestGovernanceEntities:
         apply_config(con, load_config(yaml_path))
 
         attrs = con.execute(
-            "SELECT attribute_value FROM rumi_role_attributes "
+            "SELECT attribute_value FROM gibran_role_attributes "
             "WHERE role_id = 'analyst_west' AND attribute_key = 'region'"
         ).fetchone()
         assert attrs == ("east",)
         assert con.execute(
-            "SELECT COUNT(*) FROM rumi_role_attributes WHERE role_id = 'analyst_west'"
+            "SELECT COUNT(*) FROM gibran_role_attributes WHERE role_id = 'analyst_west'"
         ).fetchone()[0] == 1
 
     def test_quality_rule_removed_from_yaml_disappears(self, tmp_path: Path) -> None:
         con = _migrated_db()
-        yaml_path = tmp_path / "rumi.yaml"
+        yaml_path = tmp_path / "gibran.yaml"
         yaml_path.write_text(
-            (FIXTURES / "rumi.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+            (FIXTURES / "gibran.yaml").read_text(encoding="utf-8"), encoding="utf-8"
         )
         apply_config(con, load_config(yaml_path))
-        assert con.execute("SELECT COUNT(*) FROM rumi_quality_rules").fetchone()[0] == 2
+        assert con.execute("SELECT COUNT(*) FROM gibran_quality_rules").fetchone()[0] == 2
 
         text = yaml_path.read_text(encoding="utf-8")
         # Drop the orders_amount_range block (last quality_rules entry)
@@ -337,7 +337,7 @@ class TestGovernanceEntities:
         rules = {
             r[0]
             for r in con.execute(
-                "SELECT rule_id FROM rumi_quality_rules"
+                "SELECT rule_id FROM gibran_quality_rules"
             ).fetchall()
         }
         assert rules == {"orders_amount_not_null"}

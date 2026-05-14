@@ -1,19 +1,19 @@
-"""Tests for the `rumi check` runner: per-rule evaluators + run_checks."""
+"""Tests for the `gibran check` runner: per-rule evaluators + run_checks."""
 from pathlib import Path
 
 import duckdb
 import pytest
 
-from rumi.observability.default import DefaultObservability
-from rumi.observability.runner import (
+from gibran.observability.default import DefaultObservability
+from gibran.observability.runner import (
     RuleResult,
     _evaluate_freshness_rule,
     _evaluate_quality_rule,
     run_checks,
 )
-from rumi.sync.applier import apply as apply_config
-from rumi.sync.loader import load as load_config
-from rumi.sync.migrations import apply_all as apply_migrations
+from gibran.sync.applier import apply as apply_config
+from gibran.sync.loader import load as load_config
+from gibran.sync.migrations import apply_all as apply_migrations
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -24,7 +24,7 @@ def _populated_db_with_data() -> duckdb.DuckDBPyConnection:
     """Catalog + governance + a real `orders` table with rows."""
     con = duckdb.connect(":memory:")
     apply_migrations(con, MIGRATIONS)
-    apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+    apply_config(con, load_config(FIXTURES / "gibran.yaml"))
     con.execute(
         "CREATE TABLE orders ("
         "order_id VARCHAR, amount DECIMAL(18,2), order_date TIMESTAMP, "
@@ -182,7 +182,7 @@ class TestRunChecks:
         obs = DefaultObservability(con)
         run_checks(con, "orders", obs)
         run_count = con.execute(
-            "SELECT COUNT(*) FROM rumi_quality_runs"
+            "SELECT COUNT(*) FROM gibran_quality_runs"
         ).fetchone()[0]
         assert run_count == 3
 
@@ -191,12 +191,12 @@ class TestRunChecks:
         obs = DefaultObservability(con)
         # Before: no health row
         assert con.execute(
-            "SELECT COUNT(*) FROM rumi_source_health WHERE source_id = 'orders'"
+            "SELECT COUNT(*) FROM gibran_source_health WHERE source_id = 'orders'"
         ).fetchone()[0] == 0
         run_checks(con, "orders", obs)
         # After: health row exists with status='healthy' (all rules pass on the fixture data)
         row = con.execute(
-            "SELECT status, blocking_failures FROM rumi_source_health "
+            "SELECT status, blocking_failures FROM gibran_source_health "
             "WHERE source_id = 'orders'"
         ).fetchone()
         assert row[0] == "healthy"
@@ -210,7 +210,7 @@ class TestRunChecks:
         result = run_checks(con, "orders", obs)
         assert result.failed >= 1
         row = con.execute(
-            "SELECT status FROM rumi_source_health WHERE source_id = 'orders'"
+            "SELECT status FROM gibran_source_health WHERE source_id = 'orders'"
         ).fetchone()
         assert row[0] == "block"
 
@@ -226,14 +226,14 @@ class TestRunChecks:
         assert any(f.rule_id == "orders_amount_not_null" for f in failures)
         # Pre-cache: the same call before refresh would have aggregated; post-cache,
         # it's a single PK lookup. Verify cache is what's being read by counting
-        # the rumi_source_health row -- if we'd been aggregating, we wouldn't need it.
+        # the gibran_source_health row -- if we'd been aggregating, we wouldn't need it.
         assert con.execute(
-            "SELECT COUNT(*) FROM rumi_source_health WHERE source_id = 'orders'"
+            "SELECT COUNT(*) FROM gibran_source_health WHERE source_id = 'orders'"
         ).fetchone()[0] == 1
 
 
 # ---------------------------------------------------------------------------
-# Cache fallback: when no rumi_source_health row exists, fall back to V1.5
+# Cache fallback: when no gibran_source_health row exists, fall back to V1.5
 # ---------------------------------------------------------------------------
 
 class TestCacheFallback:
@@ -247,7 +247,7 @@ class TestCacheFallback:
         obs.record_run("orders_amount_not_null", "quality", True)
         # Cache is empty for this source
         assert con.execute(
-            "SELECT COUNT(*) FROM rumi_source_health WHERE source_id = 'orders'"
+            "SELECT COUNT(*) FROM gibran_source_health WHERE source_id = 'orders'"
         ).fetchone()[0] == 0
         # The aggregation path is invoked. orders_freshness_24h is still never_run.
         failures = obs.latest_blocking_failures("orders")
@@ -260,7 +260,7 @@ class TestCacheFallback:
         obs = DefaultObservability(con)
         obs.refresh_health("orders")
         row = con.execute(
-            "SELECT status, blocking_failures FROM rumi_source_health "
+            "SELECT status, blocking_failures FROM gibran_source_health "
             "WHERE source_id = 'orders'"
         ).fetchone()
         assert row[0] == "block"  # never_run rules block

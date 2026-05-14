@@ -11,13 +11,13 @@
 --
 -- DuckDB does not support ALTER on CHECK constraints, so we widen the
 -- metric_type vocabulary by dropping the CHECK constraint entirely and
--- relying on Pydantic Literal-typed validation in rumi.sync.yaml_schema.
+-- relying on Pydantic Literal-typed validation in gibran.sync.yaml_schema.
 -- The DB-layer CHECK was always defense-in-depth here; the application
 -- layer remains the source of truth.
 
-CREATE TABLE rumi_metrics_new (
+CREATE TABLE gibran_metrics_new (
   metric_id       TEXT PRIMARY KEY,
-  source_id       TEXT NOT NULL REFERENCES rumi_sources,
+  source_id       TEXT NOT NULL REFERENCES gibran_sources,
   display_name    TEXT NOT NULL,
   metric_type     TEXT NOT NULL,   -- no CHECK; validated by Pydantic Literal in yaml_schema
   unit            TEXT,
@@ -26,11 +26,11 @@ CREATE TABLE rumi_metrics_new (
   current_version INTEGER NOT NULL DEFAULT 1
 );
 
-INSERT INTO rumi_metrics_new
+INSERT INTO gibran_metrics_new
   (metric_id, source_id, display_name, metric_type, unit, description, owner, current_version)
 SELECT
   metric_id, source_id, display_name, metric_type, unit, description, owner, current_version
-FROM rumi_metrics;
+FROM gibran_metrics;
 
-DROP TABLE rumi_metrics;
-ALTER TABLE rumi_metrics_new RENAME TO rumi_metrics;
+DROP TABLE gibran_metrics;
+ALTER TABLE gibran_metrics_new RENAME TO gibran_metrics;

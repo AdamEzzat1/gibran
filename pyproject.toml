@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "gibran"
 version = "0.0.1"
-description = "Rumi: governed analytics + metric layer over DuckDB. YAML-defined sources/metrics/policies; queries flow through an identity-aware governance layer that rewrites and audits every attempt."
+description = "Gibran: governed analytics + metric layer over DuckDB. YAML-defined sources/metrics/policies; queries flow through an identity-aware governance layer that rewrites and audits every attempt."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -46,16 +46,12 @@ dependencies = [
 dev = ["pytest>=8.0"]
 
 [project.urls]
-Homepage = "https://github.com/AdamEzzat1/rumi"
-Repository = "https://github.com/AdamEzzat1/rumi"
-Issues = "https://github.com/AdamEzzat1/rumi/issues"
+Homepage = "https://github.com/AdamEzzat1/gibran"
+Repository = "https://github.com/AdamEzzat1/gibran"
+Issues = "https://github.com/AdamEzzat1/gibran/issues"
 
-# The product is named Rumi; the PyPI distribution is `gibran` because
-# the `rumi` name on PyPI is held by another project. The CLI command
-# and import path remain `rumi` -- `pip install gibran` gives you
-# `import rumi` and a `rumi` console script.
 [project.scripts]
-rumi = "rumi.cli.main:app"
+gibran = "gibran.cli.main:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rumi"]
+packages = ["src/gibran"]

@@ -1,4 +1,4 @@
--- Add `valid_until` to rumi_policies for time-bound access grants
+-- Add `valid_until` to gibran_policies for time-bound access grants
 -- (contractors, consultants, temporary credentials).
 --
 -- NULL means "never expires" -- the common case. A non-NULL timestamp is
@@ -9,4 +9,4 @@
 -- No default; explicit opt-in by the policy author. No CHECK constraint --
 -- expiry-vs-now is a runtime comparison, not a stored invariant.
 
-ALTER TABLE rumi_policies ADD COLUMN valid_until TIMESTAMP;
+ALTER TABLE gibran_policies ADD COLUMN valid_until TIMESTAMP;

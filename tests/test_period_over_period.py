@@ -4,7 +4,7 @@ Covers:
   - Pydantic validation: required fields, mutually-exclusive shapes
   - Loader cross-entity validation: base_metric exists, same source,
     period_dim is temporal
-  - Applier: metric_config JSON stored on rumi_metric_versions
+  - Applier: metric_config JSON stored on gibran_metric_versions
   - Compiler: emits LAG window function with correct DATE_TRUNC
   - DSL validator: rejects intents missing the period_dim
   - End-to-end execution against DuckDB with fixture data
@@ -18,18 +18,18 @@ import duckdb
 import pytest
 from pydantic import ValidationError
 
-from rumi.dsl.compile import Catalog, CompileError, compile_intent
-from rumi.dsl.run import run_dsl_query
-from rumi.dsl.types import QueryIntent
-from rumi.dsl.validate import IntentValidationError, validate_intent
-from rumi.governance.default import DefaultGovernance
-from rumi.governance.identity import CLIResolver
-from rumi.observability.default import DefaultObservability
-from rumi.observability.runner import run_checks
-from rumi.sync.applier import apply as apply_config
-from rumi.sync.loader import ConfigValidationError, load as load_config
-from rumi.sync.migrations import apply_all as apply_migrations
-from rumi.sync.yaml_schema import MetricConfig
+from gibran.dsl.compile import Catalog, CompileError, compile_intent
+from gibran.dsl.run import run_dsl_query
+from gibran.dsl.types import QueryIntent
+from gibran.dsl.validate import IntentValidationError, validate_intent
+from gibran.governance.default import DefaultGovernance
+from gibran.governance.identity import CLIResolver
+from gibran.observability.default import DefaultObservability
+from gibran.observability.runner import run_checks
+from gibran.sync.applier import apply as apply_config
+from gibran.sync.loader import ConfigValidationError, load as load_config
+from gibran.sync.migrations import apply_all as apply_migrations
+from gibran.sync.yaml_schema import MetricConfig
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -41,7 +41,7 @@ def _populated_db_with_orders() -> duckdb.DuckDBPyConnection:
     LAG produces meaningful values."""
     con = duckdb.connect(":memory:")
     apply_migrations(con, MIGRATIONS)
-    apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+    apply_config(con, load_config(FIXTURES / "gibran.yaml"))
     con.execute(
         "CREATE TABLE orders ("
         "order_id VARCHAR, amount DECIMAL(18,2), order_date TIMESTAMP, "
@@ -59,7 +59,7 @@ def _populated_db_with_orders() -> duckdb.DuckDBPyConnection:
         "('o4', 400.00, TIMESTAMP '2026-03-05 10:00:00', 'paid', 'west', 'd@x')"
     )
     # Disable freshness rule (data is from 2026-01..03, not "now").
-    con.execute("DELETE FROM rumi_freshness_rules")
+    con.execute("DELETE FROM gibran_freshness_rules")
     return con
 
 
@@ -136,8 +136,8 @@ class TestPydanticValidation:
 
 class TestLoaderValidation:
     def _make_yaml(self, tmp_path: Path, extra: str) -> Path:
-        base = (FIXTURES / "rumi.yaml").read_text(encoding="utf-8")
-        out = tmp_path / "rumi.yaml"
+        base = (FIXTURES / "gibran.yaml").read_text(encoding="utf-8")
+        out = tmp_path / "gibran.yaml"
         out.write_text(base + extra, encoding="utf-8")
         return out
 
@@ -188,7 +188,7 @@ class TestApplierStoresMetricConfig:
     def test_metric_config_persisted_on_version(self) -> None:
         con = _populated_db_with_orders()
         row = con.execute(
-            "SELECT metric_config FROM rumi_metric_versions "
+            "SELECT metric_config FROM gibran_metric_versions "
             "WHERE metric_id = 'revenue_mom' AND effective_to IS NULL"
         ).fetchone()
         assert row is not None
@@ -226,7 +226,7 @@ class TestCompiler:
         # Switch the metric's comparison to ratio via direct UPDATE
         # (alternative would be re-syncing yaml; this is faster).
         con.execute(
-            "UPDATE rumi_metric_versions SET metric_config = ? "
+            "UPDATE gibran_metric_versions SET metric_config = ? "
             "WHERE metric_id = 'revenue_mom' AND effective_to IS NULL",
             [json.dumps({
                 "base_metric": "gross_revenue",
@@ -247,7 +247,7 @@ class TestCompiler:
     def test_compile_pct_change_comparison(self) -> None:
         con = _populated_db_with_orders()
         con.execute(
-            "UPDATE rumi_metric_versions SET metric_config = ? "
+            "UPDATE gibran_metric_versions SET metric_config = ? "
             "WHERE metric_id = 'revenue_mom' AND effective_to IS NULL",
             [json.dumps({
                 "base_metric": "gross_revenue",
@@ -269,7 +269,7 @@ class TestCompiler:
     def test_filter_on_pop_metric_rejected(self) -> None:
         con = _populated_db_with_orders()
         con.execute(
-            "UPDATE rumi_metric_versions SET filter_sql = 'status = ''paid''' "
+            "UPDATE gibran_metric_versions SET filter_sql = 'status = ''paid''' "
             "WHERE metric_id = 'revenue_mom' AND effective_to IS NULL"
         )
         intent = QueryIntent(

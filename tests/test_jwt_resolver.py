@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 import pytest
 
-from rumi.governance.identity import JWTResolver
+from gibran.governance.identity import JWTResolver
 
 
 SECRET = "test-secret-do-not-use-in-prod"
@@ -99,20 +99,20 @@ class TestResolve:
             r.resolve(token)
 
     def test_audience_enforced(self) -> None:
-        token = _encode({"sub": "alice", "aud": "rumi"})
+        token = _encode({"sub": "alice", "aud": "gibran"})
         r = JWTResolver(static_key=SECRET, audience="other_service")
         with pytest.raises(jwt.InvalidAudienceError):
             r.resolve(token)
 
     def test_audience_accepted_when_matching(self) -> None:
-        token = _encode({"sub": "alice", "aud": "rumi"})
-        r = JWTResolver(static_key=SECRET, audience="rumi")
+        token = _encode({"sub": "alice", "aud": "gibran"})
+        r = JWTResolver(static_key=SECRET, audience="gibran")
         ident = r.resolve(token)
         assert ident.user_id == "alice"
 
     def test_issuer_enforced(self) -> None:
         token = _encode({"sub": "alice", "iss": "evil.example"})
-        r = JWTResolver(static_key=SECRET, issuer="rumi.example")
+        r = JWTResolver(static_key=SECRET, issuer="gibran.example")
         with pytest.raises(jwt.InvalidIssuerError):
             r.resolve(token)
 

@@ -10,14 +10,14 @@ trust contexts:
 """
 import pytest
 
-from rumi.governance.ast import (
+from gibran.governance.ast import (
     ASTValidationError,
     compile_intent_to_sql,
     compile_policy_to_sql,
     validate_intent_ast,
     validate_policy_ast,
 )
-from rumi.governance.types import IdentityContext
+from gibran.governance.types import IdentityContext
 
 
 KNOWN_COLS = frozenset({"region", "tier", "amount", "status"})

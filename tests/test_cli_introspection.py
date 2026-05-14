@@ -2,9 +2,9 @@
 and the new `query --output csv|json|parquet` formats.
 
 Each test:
-  - builds a tmp_path-based rumi.duckdb (init + sync against fixtures/rumi.yaml)
+  - builds a tmp_path-based gibran.duckdb (init + sync against fixtures/gibran.yaml)
   - seeds the `orders` table with a few rows
-  - runs `rumi check` so source_health is populated
+  - runs `gibran check` so source_health is populated
   - invokes the CLI subcommand via typer.testing.CliRunner
   - asserts the exit code + stdout shape
 """
@@ -17,12 +17,12 @@ import duckdb
 import pytest
 from typer.testing import CliRunner
 
-from rumi.cli.main import app
-from rumi.observability.default import DefaultObservability
-from rumi.observability.runner import run_checks
-from rumi.sync.applier import apply as apply_config
-from rumi.sync.loader import load as load_config
-from rumi.sync.migrations import apply_all as apply_migrations
+from gibran.cli.main import app
+from gibran.observability.default import DefaultObservability
+from gibran.observability.runner import run_checks
+from gibran.sync.applier import apply as apply_config
+from gibran.sync.loader import load as load_config
+from gibran.sync.migrations import apply_all as apply_migrations
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -30,13 +30,13 @@ MIGRATIONS = Path(__file__).parent.parent / "migrations"
 
 
 def _bootstrap(tmp_path: Path) -> None:
-    """Build a populated rumi.duckdb in tmp_path and run rumi check so the
+    """Build a populated gibran.duckdb in tmp_path and run gibran check so the
     source_health cache is fresh."""
-    db = tmp_path / "rumi.duckdb"
+    db = tmp_path / "gibran.duckdb"
     con = duckdb.connect(str(db))
     try:
         apply_migrations(con, MIGRATIONS)
-        apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+        apply_config(con, load_config(FIXTURES / "gibran.yaml"))
         con.execute(
             "CREATE TABLE orders ("
             "order_id VARCHAR, amount DECIMAL(18,2), order_date TIMESTAMP, "
@@ -56,7 +56,7 @@ def _bootstrap(tmp_path: Path) -> None:
 
 @pytest.fixture
 def cli_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Bootstrap a rumi.duckdb in tmp_path and chdir there so CLI commands
+    """Bootstrap a gibran.duckdb in tmp_path and chdir there so CLI commands
     that look at cwd find it."""
     _bootstrap(tmp_path)
     # The CLI helper functions use Path.cwd() to find the DB.
@@ -92,10 +92,10 @@ class TestExplain:
         ])
         assert result.exit_code == 0
         # Audit log should still be empty (no execution).
-        db = cli_env / "rumi.duckdb"
+        db = cli_env / "gibran.duckdb"
         con = duckdb.connect(str(db))
         try:
-            cnt = con.execute("SELECT COUNT(*) FROM rumi_query_log").fetchone()[0]
+            cnt = con.execute("SELECT COUNT(*) FROM gibran_query_log").fetchone()[0]
             assert cnt == 0
         finally:
             con.close()

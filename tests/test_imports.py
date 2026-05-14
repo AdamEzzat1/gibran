@@ -1,34 +1,34 @@
 def test_all_modules_import() -> None:
-    import rumi  # noqa: F401
-    import rumi.catalog  # noqa: F401
-    import rumi.governance  # noqa: F401
-    import rumi.governance.types  # noqa: F401
-    import rumi.governance.identity  # noqa: F401
-    import rumi.governance.ast  # noqa: F401
-    import rumi.governance.default  # noqa: F401
-    import rumi.execution  # noqa: F401
-    import rumi.execution.sql  # noqa: F401
-    import rumi.observability.types  # noqa: F401
-    import rumi.observability.default  # noqa: F401
-    import rumi.observability.runner  # noqa: F401
-    import rumi._sql  # noqa: F401
-    import rumi.dsl  # noqa: F401
-    import rumi.dsl.types  # noqa: F401
-    import rumi.dsl.validate  # noqa: F401
-    import rumi.dsl.compile  # noqa: F401
-    import rumi.dsl.run  # noqa: F401
-    import rumi.semantic  # noqa: F401
-    import rumi.observability  # noqa: F401
-    import rumi.nl  # noqa: F401
-    import rumi.perf  # noqa: F401
-    import rumi.sync  # noqa: F401
-    import rumi.sync.migrations  # noqa: F401
-    import rumi.cli  # noqa: F401
-    import rumi.cli.main  # noqa: F401
+    import gibran  # noqa: F401
+    import gibran.catalog  # noqa: F401
+    import gibran.governance  # noqa: F401
+    import gibran.governance.types  # noqa: F401
+    import gibran.governance.identity  # noqa: F401
+    import gibran.governance.ast  # noqa: F401
+    import gibran.governance.default  # noqa: F401
+    import gibran.execution  # noqa: F401
+    import gibran.execution.sql  # noqa: F401
+    import gibran.observability.types  # noqa: F401
+    import gibran.observability.default  # noqa: F401
+    import gibran.observability.runner  # noqa: F401
+    import gibran._sql  # noqa: F401
+    import gibran.dsl  # noqa: F401
+    import gibran.dsl.types  # noqa: F401
+    import gibran.dsl.validate  # noqa: F401
+    import gibran.dsl.compile  # noqa: F401
+    import gibran.dsl.run  # noqa: F401
+    import gibran.semantic  # noqa: F401
+    import gibran.observability  # noqa: F401
+    import gibran.nl  # noqa: F401
+    import gibran.perf  # noqa: F401
+    import gibran.sync  # noqa: F401
+    import gibran.sync.migrations  # noqa: F401
+    import gibran.cli  # noqa: F401
+    import gibran.cli.main  # noqa: F401
 
 
 def test_governance_public_api() -> None:
-    from rumi.governance import (
+    from gibran.governance import (
         ALLOWED_AST_OPS,
         AllowedSchema,
         ColumnView,
@@ -78,16 +78,16 @@ def test_governance_public_api() -> None:
 
 
 def test_identity_resolvers_signatures() -> None:
-    from rumi.governance.identity import CLIResolver, EnvResolver, JWTResolver
+    from gibran.governance.identity import CLIResolver, EnvResolver, JWTResolver
 
     cli = CLIResolver(user_id="alice", role_id="analyst_west", attributes={"region": "west"})
     ident = cli.resolve(None)
     assert ident.user_id == "alice"
     assert ident.source == "cli"
 
-    jwt = JWTResolver(jwks_url="https://idp/jwks", audience="rumi", issuer="https://idp")
-    assert jwt.audience == "rumi"
+    jwt = JWTResolver(jwks_url="https://idp/jwks", audience="gibran", issuer="https://idp")
+    assert jwt.audience == "gibran"
 
     env = EnvResolver()
-    # resolve raises until RUMI_ENV=dev; instantiation alone is fine
+    # resolve raises until GIBRAN_ENV=dev; instantiation alone is fine
     assert env is not None

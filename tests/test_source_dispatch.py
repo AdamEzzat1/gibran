@@ -17,24 +17,24 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from rumi._source_dispatch import (
+from gibran._source_dispatch import (
     SourceDispatchError,
     from_clause_for_source,
 )
-from rumi.dsl.compile import Catalog, compile_intent
-from rumi.dsl.run import run_dsl_query
-from rumi.dsl.types import QueryIntent
-from rumi.governance.default import DefaultGovernance
-from rumi.governance.identity import CLIResolver
-from rumi.observability.default import DefaultObservability
-from rumi.observability.runner import (
+from gibran.dsl.compile import Catalog, compile_intent
+from gibran.dsl.run import run_dsl_query
+from gibran.dsl.types import QueryIntent
+from gibran.governance.default import DefaultGovernance
+from gibran.governance.identity import CLIResolver
+from gibran.observability.default import DefaultObservability
+from gibran.observability.runner import (
     _evaluate_freshness_rule,
     _evaluate_quality_rule,
     run_checks,
 )
-from rumi.sync.applier import apply as apply_config
-from rumi.sync.loader import load as load_config
-from rumi.sync.migrations import apply_all as apply_migrations
+from gibran.sync.applier import apply as apply_config
+from gibran.sync.loader import load as load_config
+from gibran.sync.migrations import apply_all as apply_migrations
 
 
 MIGRATIONS = Path(__file__).parent.parent / "migrations"
@@ -45,7 +45,7 @@ def _register_source(
     con: duckdb.DuckDBPyConnection, source_id: str, source_type: str, uri: str
 ) -> None:
     con.execute(
-        "INSERT INTO rumi_sources (source_id, display_name, source_type, uri) "
+        "INSERT INTO gibran_sources (source_id, display_name, source_type, uri) "
         "VALUES (?, ?, ?, ?)",
         [source_id, source_id, source_type, uri],
     )
@@ -177,18 +177,18 @@ class TestDSLCompileAgainstParquet:
 
         con = duckdb.connect(":memory:")
         apply_migrations(con, MIGRATIONS)
-        apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+        apply_config(con, load_config(FIXTURES / "gibran.yaml"))
 
         # Override the orders source to be a parquet pointing at our tmp file.
         con.execute(
-            "UPDATE rumi_sources SET source_type = 'parquet', uri = ? "
+            "UPDATE gibran_sources SET source_type = 'parquet', uri = ? "
             "WHERE source_id = 'orders'",
             [parquet_path.as_posix()],
         )
 
         # Disable the freshness rule -- our seeded data is from 2026-05-13,
         # not "now", so a 24-hour max would fail in real time.
-        con.execute("DELETE FROM rumi_freshness_rules")
+        con.execute("DELETE FROM gibran_freshness_rules")
 
         identity = CLIResolver(
             user_id="alice", role_id="analyst_west", attributes={"region": "west"}
@@ -233,7 +233,7 @@ class TestDSLCompileEmitsRelationalFrom:
     def test_duckdb_table_from_is_bare_ident(self) -> None:
         con = duckdb.connect(":memory:")
         apply_migrations(con, MIGRATIONS)
-        apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+        apply_config(con, load_config(FIXTURES / "gibran.yaml"))
         # The fixture uses duckdb_table type already.
         sql = compile_intent(
             QueryIntent(source="orders", metrics=["order_count"]),

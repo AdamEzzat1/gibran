@@ -4,17 +4,17 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from rumi.execution.sql import (
+from gibran.execution.sql import (
     QueryParseError,
     UnsupportedQueryError,
     _parse_for_governance,
     run_sql_query,
 )
-from rumi.governance.default import DefaultGovernance
-from rumi.governance.types import DenyReason, IdentityContext
-from rumi.sync.applier import apply as apply_config
-from rumi.sync.loader import load as load_config
-from rumi.sync.migrations import apply_all as apply_migrations
+from gibran.governance.default import DefaultGovernance
+from gibran.governance.types import DenyReason, IdentityContext
+from gibran.sync.applier import apply as apply_config
+from gibran.sync.loader import load as load_config
+from gibran.sync.migrations import apply_all as apply_migrations
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -26,7 +26,7 @@ def _make_db_with_orders_data() -> duckdb.DuckDBPyConnection:
     rewritten queries can hit."""
     con = duckdb.connect(":memory:")
     apply_migrations(con, MIGRATIONS)
-    apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+    apply_config(con, load_config(FIXTURES / "gibran.yaml"))
     con.execute(
         """
         CREATE TABLE orders (
@@ -272,7 +272,7 @@ class TestAuditLog:
         )
         log = con.execute(
             "SELECT user_id, role_id, status, generated_sql, row_count, deny_reason "
-            "FROM rumi_query_log WHERE query_id = ?",
+            "FROM gibran_query_log WHERE query_id = ?",
             [result.query_id],
         ).fetchone()
         assert log[0] == "alice"
@@ -292,7 +292,7 @@ class TestAuditLog:
         )
         log = con.execute(
             "SELECT status, deny_reason, row_count, generated_sql "
-            "FROM rumi_query_log WHERE query_id = ?",
+            "FROM gibran_query_log WHERE query_id = ?",
             [result.query_id],
         ).fetchone()
         assert log[0] == "denied"
@@ -311,7 +311,7 @@ class TestAuditLog:
         )
         log = con.execute(
             "SELECT status, deny_reason, row_count "
-            "FROM rumi_query_log WHERE query_id = ?",
+            "FROM gibran_query_log WHERE query_id = ?",
             [result.query_id],
         ).fetchone()
         assert log[0] == "error"
@@ -330,7 +330,7 @@ class TestAuditLog:
             ids.add(result.query_id)
         assert len(ids) == 5
         rows = con.execute(
-            "SELECT COUNT(*) FROM rumi_query_log WHERE user_id = ?",
+            "SELECT COUNT(*) FROM gibran_query_log WHERE user_id = ?",
             [ident.user_id],
         ).fetchone()
         assert rows[0] == 5

@@ -1,7 +1,7 @@
-"""Tests for `rumi init --sample`.
+"""Tests for `gibran init --sample`.
 
 Verifies:
-  - --sample creates rumi.yaml in CWD
+  - --sample creates gibran.yaml in CWD
   - --sample seeds a populated `orders` table
   - The full quickstart pipeline (sync + check + query) works against
     the seeded sample without any manual setup
@@ -16,7 +16,7 @@ import duckdb
 import pytest
 from typer.testing import CliRunner
 
-from rumi.cli.main import app
+from gibran.cli.main import app
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -39,7 +39,7 @@ def test_init_sample_creates_yaml(sample_env: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["init", "--sample"])
     assert result.exit_code == 0, result.output
-    cfg = sample_env / "rumi.yaml"
+    cfg = sample_env / "gibran.yaml"
     assert cfg.exists()
     text = cfg.read_text(encoding="utf-8")
     assert "sources:" in text
@@ -51,7 +51,7 @@ def test_init_sample_seeds_orders_table(sample_env: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["init", "--sample"])
     assert result.exit_code == 0
-    db = sample_env / "rumi.duckdb"
+    db = sample_env / "gibran.duckdb"
     assert db.exists()
     con = duckdb.connect(str(db))
     try:
@@ -64,7 +64,7 @@ def test_init_sample_seeds_orders_table(sample_env: Path) -> None:
 def test_init_sample_does_not_overwrite_existing_yaml(
     sample_env: Path,
 ) -> None:
-    cfg = sample_env / "rumi.yaml"
+    cfg = sample_env / "gibran.yaml"
     cfg.write_text("# existing user config\nsources: []\n", encoding="utf-8")
     runner = CliRunner()
     result = runner.invoke(app, ["init", "--sample"])
@@ -96,4 +96,4 @@ def test_init_without_sample_does_not_create_yaml(sample_env: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
-    assert not (sample_env / "rumi.yaml").exists()
+    assert not (sample_env / "gibran.yaml").exists()

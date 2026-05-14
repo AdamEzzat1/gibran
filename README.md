@@ -1,4 +1,4 @@
-# Rumi
+# Gibran
 
 Governed analytics over DuckDB. YAML-defined sources, metrics, dimensions,
 roles, and policies; every query — raw SQL or a typed JSON DSL — flows
@@ -15,20 +15,15 @@ database engine — storage and execution belong to DuckDB. The wedge is
 pip install gibran
 ```
 
-The PyPI distribution is named `gibran` because the `rumi` name on PyPI
-is held by another project. The CLI command and Python import path are
-both `rumi` — `pip install gibran` gives you `import rumi` and a `rumi`
-console script. (Same pattern as `pip install pyyaml` → `import yaml`.)
-
 Requires Python 3.11+.
 
 ## Quickstart
 
 ```
-rumi init --sample
-rumi sync
-rumi check
-rumi query --role analyst_west --attr region=west \
+gibran init --sample
+gibran sync
+gibran check
+gibran query --role analyst_west --attr region=west \
   --dsl '{"source":"orders","metrics":["order_count","gross_revenue"]}'
 ```
 
@@ -41,16 +36,16 @@ recorded for each attempt.
 
 | Capability | How |
 |---|---|
-| Declare metrics declaratively | `metrics:` block in `rumi.yaml`; 10 primitives (`count` / `sum` / `avg` / `min` / `max` / `ratio` / `expression` / `percentile` / `rolling_window` / `period_over_period`). |
+| Declare metrics declaratively | `metrics:` block in `gibran.yaml`; 10 primitives (`count` / `sum` / `avg` / `min` / `max` / `ratio` / `expression` / `percentile` / `rolling_window` / `period_over_period`). |
 | Compose metrics | `ratio` references two metrics; `expression` templates with `{metric_id}`; cycle detection at sync time via a dependency DAG. |
 | Govern access by role | YAML-declared policies with row-filter ASTs (operator whitelist) and column allow/deny. |
 | Hide PII | `sensitivity: pii` / `restricted` on columns; default-deny per-policy; explicit grants required. |
 | Bound access in time | `valid_until` on policies for contractors / consultants / temporary credentials. Evaluation denies past the timestamp without re-sync. |
-| Audit every query | `rumi_query_log` table; for each allow/deny/error, the rewritten SQL + structured deny reason are recorded. Literals adjacent to sensitive columns are redacted before persistence. |
+| Audit every query | `gibran_query_log` table; for each allow/deny/error, the rewritten SQL + structured deny reason are recorded. Literals adjacent to sensitive columns are redacted before persistence. |
 | Detect data-quality issues | `quality_rules` (`not_null` / `unique` / `range` / `custom_sql`) + `freshness_rules`. A failing `severity: block` rule denies subsequent queries until the data is healthy. |
 | Read from anywhere DuckDB can | Parquet, CSV, DuckDB table, or SQL view — a source-type dispatcher resolves the FROM clause. No manual `CREATE VIEW` needed for file-backed sources. |
-| Introspect what's available | `rumi describe <source>`, `rumi catalog`, `rumi explain --dsl '...'` (parse + validate + compile without executing). |
-| Export results | `rumi query --output csv|json|parquet [path]`. |
+| Introspect what's available | `gibran describe <source>`, `gibran catalog`, `gibran explain --dsl '...'` (parse + validate + compile without executing). |
+| Export results | `gibran query --output csv|json|parquet [path]`. |
 
 ## What's proven (334 tests)
 
@@ -74,7 +69,7 @@ completes in under a minute.
 | `test_migrations.py` | 10 | All 7 migrations apply clean + idempotent; pinned schema invariants. |
 | `test_source_dispatch.py` | 9 | Parquet / CSV / DuckDB table / SQL view dispatcher; FROM-clause shape per type. |
 | `test_ast_intent.py` | 8 | Intent-AST trust boundary — rejects `{"$attr":...}` substitution in DSL context. |
-| `test_init_sample.py` | 5 | `rumi init --sample` round-trip with a synthetic project. |
+| `test_init_sample.py` | 5 | `gibran init --sample` round-trip with a synthetic project. |
 | `test_imports.py` | 3 | All modules importable; no circular imports. |
 
 ## YAML syntax
@@ -254,13 +249,13 @@ SQL-injection-via-policy-author bugs by construction.
 
 ```bash
 # analyst_west: gets the filtered view
-$ rumi query --role analyst_west --attr region=west \
+$ gibran query --role analyst_west --attr region=west \
     --dsl '{"source":"orders","metrics":["order_count"]}'
 # rewritten SQL: SELECT COUNT(*) FROM "orders" WHERE ("region" = 'west')
 # row count: 1
 
 # external_partner: column access denied
-$ rumi query --role external_partner \
+$ gibran query --role external_partner \
     --sql "SELECT customer_email FROM orders"
 # status=denied, deny_reason=policy:no_column_access:customer_email
 # (exit code 2)
@@ -284,11 +279,11 @@ policies:
 
 ```bash
 # Before 2027-01-01: allowed
-$ rumi query --role contractor_analyst --sql "SELECT COUNT(*) FROM orders"
+$ gibran query --role contractor_analyst --sql "SELECT COUNT(*) FROM orders"
 # 12340
 
 # After: denied automatically; no re-sync required
-$ rumi query --role contractor_analyst --sql "SELECT COUNT(*) FROM orders"
+$ gibran query --role contractor_analyst --sql "SELECT COUNT(*) FROM orders"
 # status=denied, deny_reason=policy:expired:valid_until=2026-12-31T23:59:59
 ```
 
@@ -312,7 +307,7 @@ metrics:
 ```
 
 ```bash
-$ rumi query --role analyst_west --attr region=west \
+$ gibran query --role analyst_west --attr region=west \
     --dsl '{
       "source": "orders",
       "metrics": ["avg_order_value"],
@@ -323,7 +318,7 @@ $ rumi query --role analyst_west --attr region=west \
 The compiler resolves `avg_order_value` to
 `(SUM(amount) FILTER (WHERE status='paid')) / NULLIF(COUNT(*), 0)`,
 injects `WHERE region='west'`, groups by month, and runs. The
-`rumi_query_log` row records `metric_versions=[("avg_order_value", 1),
+`gibran_query_log` row records `metric_versions=[("avg_order_value", 1),
 ("gross_revenue", 1), ("order_count", 1)]` for reproducibility — you
 know exactly which metric definitions answered this question.
 
@@ -331,19 +326,19 @@ know exactly which metric definitions answered this question.
 
 | Command | What it does |
 |---|---|
-| `rumi init [--sample]` | Apply migrations; with `--sample`, drop a starter `rumi.yaml` + seed data. |
-| `rumi sync` | Validate `rumi.yaml` and write to the catalog + governance tables. |
-| `rumi check [--source <id>]` | Run quality + freshness rules; refresh source-health cache. |
-| `rumi query --role <r> [--attr k=v]... ` `"<sql>"` ` \| --dsl '{...}'` | Execute a governed query. `--output tsv\|csv\|json\|parquet [file]`. Structured exit codes: 0=ok, 1=failed-rule, 2=denied, 3=error. |
-| `rumi explain --role <r> --dsl '{...}'` | Compile without executing; print SQL + applied governance. |
-| `rumi describe <source> --role <r>` | Show AllowedSchema (columns / dimensions / metrics / row filter) for an identity. |
-| `rumi catalog --role <r>` | List sources the identity can see, with column/dim/metric counts. |
-| `rumi register` | Generate a sample JWT for local dev. |
+| `gibran init [--sample]` | Apply migrations; with `--sample`, drop a starter `gibran.yaml` + seed data. |
+| `gibran sync` | Validate `gibran.yaml` and write to the catalog + governance tables. |
+| `gibran check [--source <id>]` | Run quality + freshness rules; refresh source-health cache. |
+| `gibran query --role <r> [--attr k=v]... ` `"<sql>"` ` \| --dsl '{...}'` | Execute a governed query. `--output tsv\|csv\|json\|parquet [file]`. Structured exit codes: 0=ok, 1=failed-rule, 2=denied, 3=error. |
+| `gibran explain --role <r> --dsl '{...}'` | Compile without executing; print SQL + applied governance. |
+| `gibran describe <source> --role <r>` | Show AllowedSchema (columns / dimensions / metrics / row filter) for an identity. |
+| `gibran catalog --role <r>` | List sources the identity can see, with column/dim/metric counts. |
+| `gibran register` | Generate a sample JWT for local dev. |
 
 ## Project layout
 
 ```
-src/rumi/
+src/gibran/
   catalog/            # docstrings — schema is in migrations/
   governance/         # identity, policies, ast, evaluate, redaction
   observability/      # quality/freshness types + runner
