@@ -312,6 +312,155 @@ class TestMultiMetric:
 
 
 # ---------------------------------------------------------------------------
+# Pattern: metric_by_dim_and_grain (one named dim + temporal at grain)
+# ---------------------------------------------------------------------------
+
+class TestMetricByDimAndGrain:
+    def test_dim_plus_month_grain(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue by region by month", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["gross_revenue"]
+        assert m.intent["dimensions"] == [
+            {"id": "orders.region"},
+            {"id": "orders.order_date", "grain": "month"},
+        ]
+
+    def test_dim_plus_year_grain(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue by region by year", schema)
+        assert m is not None
+        assert m.intent["dimensions"][1] == {
+            "id": "orders.order_date", "grain": "year"
+        }
+
+    def test_redundant_temporal_dim_falls_through(self) -> None:
+        # "<temporal_dim> by <grain>" -- the user is specifying the temporal
+        # dim twice (once as the named dim, once implicitly via grain). The
+        # pattern raises NoMatch and falls through to metric_by_grain, which
+        # handles "<metric> by <grain>" correctly.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue by order_date by month", schema)
+        # metric_by_grain doesn't match (extra " by month" tail).
+        # multi_metric doesn't match (no " and ").
+        # Falls through -- returns None or matches some other pattern.
+        # The point: it doesn't produce a 2-dim intent that double-counts
+        # the temporal dim.
+        assert m is None or m.intent.get("dimensions") != [
+            {"id": "orders.order_date"},
+            {"id": "orders.order_date", "grain": "month"},
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Pattern: metric_by_two_dims
+# ---------------------------------------------------------------------------
+
+class TestMetricByTwoDims:
+    def test_two_dims_by_separator(self) -> None:
+        # Fixture only has 2 dims (orders.region categorical + orders.order_date
+        # temporal). Using both with " by " separator.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue by region by order_date", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["gross_revenue"]
+        assert m.intent["dimensions"] == [
+            {"id": "orders.region"},
+            {"id": "orders.order_date"},
+        ]
+
+    def test_two_dims_comma_separator(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue by region, order_date", schema)
+        assert m is not None
+        assert m.intent["dimensions"] == [
+            {"id": "orders.region"},
+            {"id": "orders.order_date"},
+        ]
+
+    def test_duplicate_dims_rejected(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue by region by region", schema)
+        assert m is None
+
+
+# ---------------------------------------------------------------------------
+# Pattern: metric_where_between (inclusive numeric range)
+# ---------------------------------------------------------------------------
+
+class TestMetricWhereBetween:
+    def test_amount_between(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "gross revenue where amount between 50 and 200", schema,
+        )
+        assert m is not None
+        # NOTE: "count of orders where ..." would NOT route here because
+        # count_of_thing matches first and ignores the trailing text (it
+        # picks the first count-type metric regardless of the noun). For
+        # an amount-bounded count, the user writes "order_count where ..."
+        # to skip the count_of_thing keyword prefix.
+        assert m.intent["filters"] == [{
+            "op": "and",
+            "args": [
+                {"op": "gte", "column": "amount", "value": 50},
+                {"op": "lte", "column": "amount", "value": 200},
+            ],
+        }]
+
+    def test_float_bounds(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "gross revenue where amount between 0.5 and 99.99", schema,
+        )
+        assert m is not None
+        assert m.intent["filters"][0]["args"][0]["value"] == 0.5
+        assert m.intent["filters"][0]["args"][1]["value"] == 99.99
+
+    def test_unknown_column_returns_none(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "gross revenue where bogus between 0 and 100", schema,
+        )
+        assert m is None
+
+
+# ---------------------------------------------------------------------------
+# Pattern: metric_where (single comparison filter on a numeric column)
+# ---------------------------------------------------------------------------
+
+class TestMetricWhere:
+    def test_amount_greater_than(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue where amount > 100", schema)
+        assert m is not None
+        assert m.intent["filters"] == [
+            {"op": "gt", "column": "amount", "value": 100},
+        ]
+
+    def test_amount_gte(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue where amount >= 50.5", schema)
+        assert m is not None
+        assert m.intent["filters"][0] == {
+            "op": "gte", "column": "amount", "value": 50.5,
+        }
+
+    def test_neq(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue where amount != 0", schema)
+        assert m is not None
+        assert m.intent["filters"][0] == {
+            "op": "neq", "column": "amount", "value": 0,
+        }
+
+    def test_unknown_column_returns_none(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue where bogus > 100", schema)
+        assert m is None
+
+
+# ---------------------------------------------------------------------------
 # Pattern: metric_filter_compound (two AND-ed eq filters)
 # ---------------------------------------------------------------------------
 
@@ -757,6 +906,58 @@ class TestMetricFilteredByValue:
         m = nl_to_intent("gross revenue for mars", schema)
         # Falls through to single_metric; "gross revenue for mars" treated
         # as a single phrase -> no metric match; result is None.
+        assert m is None
+
+
+# ---------------------------------------------------------------------------
+# Pattern: metric_period_over_period (yoy / mom / vs last year / etc.)
+# ---------------------------------------------------------------------------
+
+class TestMetricPeriodOverPeriod:
+    def test_revenue_yoy(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("revenue yoy", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["revenue_yoy"]
+        # period_over_period requires the period_dim at matching grain
+        # in the intent -- auto-added by the pattern.
+        assert m.intent["dimensions"] == [
+            {"id": "orders.order_date", "grain": "year"}
+        ]
+
+    def test_vs_last_year_routes_to_yoy(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("revenue vs last year", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["revenue_yoy"]
+
+    def test_year_over_year_long_form(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("revenue year over year", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["revenue_yoy"]
+
+    def test_mom_routes_to_revenue_mom(self) -> None:
+        # Same noun "revenue" but mom keyword routes to month metric.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("revenue mom", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["revenue_mom"]
+        assert m.intent["dimensions"] == [
+            {"id": "orders.order_date", "grain": "month"}
+        ]
+
+    def test_vs_last_month_routes_to_mom(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("revenue vs last month", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["revenue_mom"]
+
+    def test_no_matching_period_metric_returns_none(self) -> None:
+        # No qoq metric in fixture -- pattern matches "vs last quarter"
+        # but finds no period_over_period metric with quarter hint.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("revenue qoq", schema)
         assert m is None
 
 

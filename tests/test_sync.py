@@ -45,6 +45,10 @@ def test_loads_valid_yaml() -> None:
         "median_amount",
         "first_amount",
         "last_amount",
+        # Phase 3 comparison-routing addition:
+        "revenue_yoy",
+        # Phase 3 cohort_filter primitive addition:
+        "jan_to_feb_returners",
     }
     assert validated.metric_dependencies["avg_order_value"] == frozenset(
         {"order_count", "gross_revenue"}
@@ -73,7 +77,7 @@ def test_apply_populates_catalog_and_governance() -> None:
     counts = apply_config(con, validated)
 
     assert counts == {
-        "sources": 1, "columns": 6, "dimensions": 2, "metrics": 16,
+        "sources": 1, "columns": 6, "dimensions": 2, "metrics": 18,
         "roles": 2, "policies": 2, "quality_rules": 2, "freshness_rules": 1,
     }
 
@@ -82,9 +86,10 @@ def test_apply_populates_catalog_and_governance() -> None:
         r[0] for r in con.execute("SELECT metric_id FROM gibran_metrics").fetchall()
     ) == [
         "avg_amount", "avg_order_value", "customer_retention", "first_amount",
-        "gross_revenue", "last_amount", "max_amount", "median_amount", "min_amount",
+        "gross_revenue", "jan_to_feb_returners",
+        "last_amount", "max_amount", "median_amount", "min_amount",
         "order_count", "p95_amount", "paid_funnel", "revenue_7d_rolling",
-        "revenue_mom", "revenue_per_paid_order", "unique_customers",
+        "revenue_mom", "revenue_per_paid_order", "revenue_yoy", "unique_customers",
     ]
 
     deps = {
@@ -97,6 +102,7 @@ def test_apply_populates_catalog_and_governance() -> None:
         ("avg_order_value", "order_count"),
         ("avg_order_value", "gross_revenue"),
         ("revenue_mom", "gross_revenue"),
+        ("revenue_yoy", "gross_revenue"),
     }
 
     versions = {
@@ -122,13 +128,13 @@ def test_apply_idempotent() -> None:
     validated = load_config(FIXTURES / "gibran.yaml")
     apply_config(con, validated)
     apply_config(con, validated)
-    assert con.execute("SELECT COUNT(*) FROM gibran_metric_versions").fetchone()[0] == 16
-    assert con.execute("SELECT COUNT(*) FROM gibran_metrics").fetchone()[0] == 16
+    assert con.execute("SELECT COUNT(*) FROM gibran_metric_versions").fetchone()[0] == 18
+    assert con.execute("SELECT COUNT(*) FROM gibran_metrics").fetchone()[0] == 18
     # avg_order_value (ratio) declares 2 deps; revenue_mom (period_over_period)
     # declares 1 dep on its base_metric (gross_revenue); revenue_per_paid_order
     # (expression) deps are not tracked in V1 (loader only extracts deps for
-    # ratio and period_over_period metrics).
-    assert con.execute("SELECT COUNT(*) FROM gibran_metric_dependencies").fetchone()[0] == 3
+    # ratio and period_over_period metrics). revenue_yoy adds 1 more pop dep.
+    assert con.execute("SELECT COUNT(*) FROM gibran_metric_dependencies").fetchone()[0] == 4
     assert con.execute("SELECT COUNT(*) FROM gibran_roles").fetchone()[0] == 2
     assert con.execute("SELECT COUNT(*) FROM gibran_role_attributes").fetchone()[0] == 1
     assert con.execute("SELECT COUNT(*) FROM gibran_policies").fetchone()[0] == 2

@@ -821,6 +821,84 @@ def _build_multi_stage_filter(
 
 
 # ---------------------------------------------------------------------------
+# cohort_filter
+# ---------------------------------------------------------------------------
+
+def _build_cohort_filter(
+    meta: _MetricMeta, from_relation: str, intent: QueryIntent
+) -> CompiledQuery:
+    """Emit the 2-CTE + JOIN cohort-filter query.
+
+    Output shape: one row, one column = the metric_id alias holding the
+    count of distinct entities matching BOTH conditions.
+
+    SQL form:
+        WITH cohort AS (
+          SELECT DISTINCT <entity_column>
+          FROM <source>
+          WHERE <cohort_condition>
+        ),
+        result AS (
+          SELECT DISTINCT <entity_column>
+          FROM <source>
+          WHERE <result_condition>
+        )
+        SELECT COUNT(*) AS <metric_id>
+        FROM cohort
+        JOIN result USING (<entity_column>)
+
+    Use case: "customers who ordered in January AND returned in February"
+    -- cohort_condition selects the January cohort, result_condition the
+    February returners. The JOIN intersects both populations.
+
+    Trust model: cohort_condition and result_condition are raw SQL
+    WHERE-clause fragments (same precedent as funnel_steps[].condition).
+    They're authored in gibran.yaml by the catalog owner, not the
+    end-user; the V1 trust boundary is "anyone who can edit gibran.yaml
+    can write arbitrary predicates."
+    """
+    cfg = meta.metric_config
+    if not cfg:
+        raise CompileError(
+            f"cohort_filter metric {meta.metric_id!r} is missing metric_config "
+            f"(was the sync re-run after the primitive was added?)"
+        )
+    entity_col = qident(cfg["entity_column"])
+    cohort_cond = cfg["cohort_condition"]
+    result_cond = cfg["result_condition"]
+
+    # File-scan sources need an alias so the raw conditions can refer
+    # to columns; relational sources already are quoted identifiers.
+    if from_relation.startswith(("read_parquet(", "read_csv(")):
+        source_from = f"{from_relation} AS {qident(intent.source)}"
+    else:
+        source_from = from_relation
+
+    cohort_sql = (
+        f"SELECT DISTINCT {entity_col}\n"
+        f"FROM {source_from}\n"
+        f"WHERE {cohort_cond}"
+    )
+    result_sql = (
+        f"SELECT DISTINCT {entity_col}\n"
+        f"FROM {source_from}\n"
+        f"WHERE {result_cond}"
+    )
+    main_sql = (
+        f"SELECT COUNT(*) AS {qident(meta.metric_id)}\n"
+        f"FROM cohort\n"
+        f"JOIN result USING ({entity_col})"
+    )
+    return CompiledQuery(
+        ctes=(
+            CTE("cohort", cohort_sql),
+            CTE("result", result_sql),
+        ),
+        main_sql=main_sql,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Shape-primitive registry classes
 # ---------------------------------------------------------------------------
 #
@@ -863,3 +941,13 @@ class MultiStageFilter(ShapePrimitive):
         self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
     ) -> CompiledQuery:
         return _build_multi_stage_filter(meta, from_clause, intent)
+
+
+@register_shape_primitive
+class CohortFilter(ShapePrimitive):
+    metric_type = "cohort_filter"
+
+    def build(
+        self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
+    ) -> CompiledQuery:
+        return _build_cohort_filter(meta, from_clause, intent)

@@ -56,7 +56,7 @@ recorded for each attempt.
 | Introspect what's available | `gibran describe <source>`, `gibran catalog`, `gibran explain --dsl '...'`. |
 | Export results | `gibran query --output csv|json|parquet [path]`. |
 
-## What's proven (559 tests)
+## What's proven (586 tests)
 
 Every test runs in-process against an in-memory DuckDB; the whole suite
 completes in under a minute.
@@ -573,7 +573,7 @@ cannot fabricate a metric that doesn't exist.
 
 ### What patterns are wired
 
-19 patterns total. Grouped by what they unlock:
+24 patterns total. Grouped by what they unlock:
 
 **Ranking & projection**
 
@@ -583,6 +583,8 @@ cannot fabricate a metric that doesn't exist.
 | `top_n_by_metric` | "top \| biggest \| largest \| highest 5 region by gross revenue" | ORDER BY DESC + LIMIT |
 | `bottom_n_by_metric` | "bottom \| smallest \| lowest \| fewest \| least 5 region by gross revenue" | ORDER BY ASC + LIMIT |
 | `metric_by_dim` | "revenue by region" | One dimension |
+| `metric_by_two_dims` | "revenue by region by order_date" / "revenue by region, order_date" | Two named dims |
+| `metric_by_dim_and_grain` | "revenue by region by month" | One named dim + temporal at grain |
 | `multi_metric` | "gross revenue and order_count [by region]" | Two metrics, optional grouping |
 | `single_metric` | "show me revenue" / "what's the p95 amount" | Bare metric |
 
@@ -595,6 +597,7 @@ cannot fabricate a metric that doesn't exist.
 | | "average \| avg \| mean order amount" | `avg` metric |
 | | "median amount" | `median` metric |
 | | "first \| last order amount" | `first_value` / `last_value` metric |
+| `metric_period_over_period` | "revenue yoy" / "revenue vs last year" / "revenue mom" / "revenue vs last quarter" | Existing `period_over_period` metric for the requested unit |
 | `metric_distribution` | "p95_amount distribution" | Existing `median` or `percentile` metric |
 
 **Time**
@@ -615,6 +618,8 @@ cannot fabricate a metric that doesn't exist.
 | `metric_filtered_by_value` | "revenue for west" | One eq filter (column inferred from `example_values`) |
 | `metric_filter_compound` | "revenue for west and paid" | Two AND-ed eq filters |
 | `metric_excluding_value` | "revenue excluding paid" | One neq filter |
+| `metric_where` | "gross revenue where amount > 100" | Numeric comparison filter (>, <, >=, <=, =, !=) on a column |
+| `metric_where_between` | "gross revenue where amount between 50 and 200" | Inclusive numeric range filter |
 | `count_with_condition` | "count of paid orders" / "how many paid orders" | Count metric + eq filter |
 | `count_of_thing` | "count of orders" / "how many" / "total" | First count metric |
 
@@ -623,18 +628,36 @@ always validates against `AllowedSchema` — unknown metrics / dims /
 filter values fall through, never get fabricated. The architecture
 supports ~30 cleanly per the architecture estimate.
 
-### Not yet covered (Phase 3 infra-dependent)
+### Cohort_filter primitive (Phase 3)
 
-These question shapes need machinery beyond regex + slot resolution
-and are tracked in [ROADMAP.md](ROADMAP.md) Phase 3:
+`cohort_filter` is a shape primitive that counts entities matching
+BOTH a cohort-condition and a result-condition sub-query. Declared
+in YAML:
+
+```yaml
+- id: jan_to_feb_returners
+  source: orders
+  type: cohort_filter
+  entity_column: customer_email
+  cohort_condition: "order_date >= '2026-01-01' AND order_date < '2026-02-01' AND status = 'paid'"
+  result_condition: "order_date >= '2026-02-01' AND order_date < '2026-03-01' AND status = 'paid'"
+```
+
+Emits a 2-CTE + JOIN query (cohort × result intersection). NL routes
+via `single_metric` ("show me jan_to_feb_returners") -- a richer
+"customers who ordered ... and returned ..." parser requires the
+Phase 3 entity recognizer.
+
+### Not yet covered
+
+These question shapes need machinery beyond what currently exists:
 
 | Question shape | Why deferred |
 |---|---|
-| "revenue vs last year" / "compare X to Y" | Needs a `comparison` primitive (compose two metric expressions with delta / ratio / pct_change) |
-| "customers who ordered last month and returned this month" | Needs a `cohort_filter` shape primitive (filter to entities matching a sub-query) |
-| "anomalies in revenue" | Needs an anomaly-as-query mechanism (today anomalies are background rules, not user queries) |
-| "show me revenue by region by month" | Multi-dimensional grouping — straightforward to add as `multi_metric_by_dims`; the entity recognizer in Phase 3 makes it natural |
-| "what changed about X" / arbitrary paraphrasing | Embedding retrieval (Tier 5 Item 20) -- only after pattern templates hit the ceiling and user feedback says the "I don't know" rate is unacceptable |
+| "anomalies in revenue" | Needs an anomaly-as-query design decision. Today anomalies are background rules writing to `gibran_quality_runs`. A queryable surface could be either a CLI command (like `gibran detect-access-anomalies`) or a new metric type that emits SELECT from `gibran_quality_runs`. Both are reasonable — neither is roadmapped. |
+| "X as percent of Y" / "X as % of Y" | Needs either MetricView to expose `numerator`/`denominator` (so the pattern can route to the right `ratio` metric) or the Phase 3 entity recognizer (which can identify the two metric phrases and synthesize a comparison primitive call). |
+| "customers who ordered last month and returned" | The `cohort_filter` primitive (above) handles the SQL shape, but NL phrasing requires entity recognition (parse "customers", "ordered last month", "returned"). Phase 3 task 3.1. |
+| "what changed about X" / arbitrary paraphrasing | Embedding retrieval (Tier 5 Item 20) -- only after pattern templates hit the ceiling and user feedback says the "I don't know" rate is unacceptable. |
 
 ## CLI reference
 
@@ -671,7 +694,7 @@ src/gibran/
   _sql.py             # qident, render_literal
   _source_dispatch.py # source_type -> FROM-clause snippet
 migrations/           # 0001 catalog -> 0009 tier4_governance
-tests/                # 559 tests across 27 files (+ benchmarks/)
+tests/                # 586 tests across 27 files (+ benchmarks/)
 prompts/
   architect_layer.md  # refined architect prompt with fixed constraints
 STATUS.md             # current per-layer state

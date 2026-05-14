@@ -54,6 +54,10 @@ class TestPreviewSchema:
             # Phase 3 NL fixture additions:
             "unique_customers", "avg_amount", "max_amount", "min_amount",
             "median_amount", "first_amount", "last_amount",
+            # Phase 3 comparison-routing addition:
+            "revenue_yoy",
+            # Phase 3 cohort_filter primitive addition:
+            "jan_to_feb_returners",
         }
 
     def test_external_partner_sees_only_granted_columns_default_deny(self) -> None:

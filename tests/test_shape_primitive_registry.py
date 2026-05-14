@@ -19,13 +19,15 @@ from gibran.dsl.types import QueryIntent
 
 
 class TestRegistryShape:
-    def test_three_concrete_primitives_registered(self) -> None:
-        # The three V1 shape primitives are registered at import time
-        # via the @register_shape_primitive decorator in dsl.compile.
-        # If a future primitive is added to the registry, this test
-        # should be updated -- the explicit list keeps surprises visible.
+    def test_concrete_primitives_registered(self) -> None:
+        # Shape primitives registered at import time via
+        # @register_shape_primitive in dsl.compile. The explicit list
+        # keeps the registry surface visible -- a future addition
+        # must update this assertion.
         assert set(SHAPE_PRIMITIVES.keys()) == {
             "cohort_retention", "funnel", "multi_stage_filter",
+            # Phase 3 addition: filter entities by sub-query intersection.
+            "cohort_filter",
         }
         # Each entry is an INSTANCE (the decorator instantiates), not
         # a class -- so callers can invoke .build / .validate_intent

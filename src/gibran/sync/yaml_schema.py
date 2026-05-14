@@ -54,6 +54,8 @@ MetricType = Literal[
     "count_distinct", "count_distinct_approx", "mode",
     # Phase 1 Task 1.10 additions:
     "variance", "first_value", "last_value", "median",
+    # Phase 3 shape primitive: filter entities by sub-query intersection.
+    "cohort_filter",
 ]
 
 RollingAggregate = Literal["sum", "avg", "min", "max", "count"]
@@ -114,12 +116,12 @@ class MetricConfig(_Strict):
                 )
             return self
         # V1 restriction: only simple aggregates can be materialized.
-        # Shape primitives (cohort/funnel/multi_stage_filter) have
-        # multi-column outputs that don't fit the (dim_cols, value) shape.
-        # ratio / expression have template references that we'd need to
-        # resolve at sync time -- deferrable.
+        # Shape primitives (cohort/funnel/multi_stage_filter/cohort_filter)
+        # have multi-column or CTE-based outputs that don't fit the
+        # (dim_cols, value) shape. ratio / expression have template
+        # references that we'd need to resolve at sync time -- deferrable.
         incompatible = {
-            "cohort_retention", "funnel", "multi_stage_filter",
+            "cohort_retention", "funnel", "multi_stage_filter", "cohort_filter",
             "ratio", "expression", "rolling_window", "period_over_period",
         }
         if self.type in incompatible:
@@ -216,6 +218,15 @@ class MetricConfig(_Strict):
     #   weighted_avg requires weight_column (alongside expression for the value)
     #   mode reuses `column` (the value to find the mode of)
     weight_column: str | None = None
+
+    # cohort_filter-specific (Phase 3 shape primitive). Output is one
+    # scalar row: the count of distinct entities matching BOTH the
+    # cohort_condition AND the result_condition.
+    # entity_column reuses the shared field (also used by cohort_retention).
+    # Conditions are raw SQL WHERE-clause fragments referencing the
+    # source's columns -- same trust model as funnel_steps[].condition.
+    cohort_condition: str | None = None
+    result_condition: str | None = None
 
     @model_validator(mode="after")
     def _check_shape(self) -> "MetricConfig":
@@ -373,6 +384,20 @@ class MetricConfig(_Strict):
             if self.expression or self.numerator or self.denominator:
                 raise ValueError(
                     f"metric {self.id!r}: multi_stage_filter cannot have "
+                    f"expression/numerator/denominator"
+                )
+        elif self.type == "cohort_filter":
+            missing = [
+                f for f in ("entity_column", "cohort_condition", "result_condition")
+                if getattr(self, f) is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"metric {self.id!r}: cohort_filter requires {missing}"
+                )
+            if self.expression or self.numerator or self.denominator:
+                raise ValueError(
+                    f"metric {self.id!r}: cohort_filter cannot have "
                     f"expression/numerator/denominator"
                 )
         elif self.type == "weighted_avg":

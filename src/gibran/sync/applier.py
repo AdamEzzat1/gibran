@@ -490,6 +490,12 @@ def _render_metric_config(m: MetricConfig) -> str | None:
             "top_n": m.top_n,
             "top_percentile": m.top_percentile,
         })
+    elif m.type == "cohort_filter":
+        cfg.update({
+            "entity_column": m.entity_column,
+            "cohort_condition": m.cohort_condition,
+            "result_condition": m.result_condition,
+        })
     if m.materialized is not None:
         cfg["materialized"] = list(m.materialized)
     return json.dumps(cfg) if cfg else None
@@ -527,6 +533,10 @@ def _render_expression(m: MetricConfig) -> str:
     if m.type == "multi_stage_filter":
         gate = f"top_n={m.top_n}" if m.top_n is not None else f"top_p={m.top_percentile}"
         return f"multi_stage_filter[{m.msf_entity_column}/{gate}]"
+    if m.type == "cohort_filter":
+        # Marker only -- the compiler builds the 2-CTE + JOIN query from
+        # metric_config (cohort_condition, result_condition, entity_column).
+        return f"cohort_filter[{m.entity_column}]"
     if m.type == "weighted_avg":
         # SUM(value * weight) / NULLIF(SUM(weight), 0). Single-pass aggregate.
         assert m.expression is not None and m.weight_column is not None

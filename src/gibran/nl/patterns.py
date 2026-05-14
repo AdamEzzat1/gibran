@@ -38,6 +38,8 @@ from gibran.nl.synonyms import (
     GRAIN_WORDS,
     MONTH_NAMES,
     OVER_TIME_WORDS,
+    PERIOD_PHRASE_TO_UNIT,
+    PERIOD_UNIT_SHORT,
     THIS_PERIOD_WORDS,
     TOP_WORDS,
     TYPE_KEYWORDS,
@@ -63,6 +65,11 @@ _GRAIN_ALT = "|".join(GRAIN_WORDS)
 _OVER_TIME_ALT = "|".join(OVER_TIME_WORDS)
 _TYPE_KEYWORD_ALT = "|".join(TYPE_KEYWORDS)
 _THIS_PERIOD_ALT = "|".join(THIS_PERIOD_WORDS)
+# Longer period phrases must come first in alternation so "year over year"
+# isn't shadowed by "year" prefix.
+_PERIOD_PHRASE_ALT = "|".join(
+    sorted(PERIOD_PHRASE_TO_UNIT.keys(), key=len, reverse=True)
+)
 _HAVING_OP_MAP: dict[str, str] = {
     ">": "gt", "<": "lt", ">=": "gte", "<=": "lte", "=": "eq",
 }
@@ -357,6 +364,54 @@ def metric_over_time(m: re.Match, schema: AllowedSchema) -> dict:
         "source": schema.source_id,
         "metrics": [metric_id],
         "dimensions": [{"id": dim_id, "grain": "month"}],
+    }
+
+
+@register(rf"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+by\s+(.+?)\s+by\s+({_GRAIN_ALT})$")
+def metric_by_dim_and_grain(m: re.Match, schema: AllowedSchema) -> dict:
+    """<metric> by <dim> by <grain> -- one named dim PLUS the first
+    temporal dim at the requested grain.
+
+    Sugar for "show me the time-series of <metric> for <dim>". Two-dim
+    output: the named dim + the temporal dim truncated to the grain.
+
+    Example: "revenue by region by month" -> SELECT region, DATE_TRUNC('month', order_date)
+    + SUM(amount) FROM orders GROUP BY 1, 2."""
+    metric_id = _resolve_metric(m.group(1), schema)
+    dim_id = _resolve_dimension(m.group(2), schema)
+    grain = GRAIN_WORDS.get(m.group(3).lower())
+    temporal_dim_id = _resolve_temporal_dim(schema)
+    if not metric_id or not dim_id or not grain or temporal_dim_id is None:
+        raise NoMatch()
+    if dim_id == temporal_dim_id:
+        # User said "<temporal> by <grain>" -- redundant, route via the
+        # single-dim grain pattern instead. NoMatch falls through.
+        raise NoMatch()
+    return {
+        "source": schema.source_id,
+        "metrics": [metric_id],
+        "dimensions": [{"id": dim_id}, {"id": temporal_dim_id, "grain": grain}],
+    }
+
+
+@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+by\s+(.+?)(?:\s+by\s+|,\s*)(.+)$")
+def metric_by_two_dims(m: re.Match, schema: AllowedSchema) -> dict:
+    """<metric> by <dim1> {by <dim2> | , <dim2>} -- two named dimensions.
+
+    The separator between dims accepts " by " or ", ". For the
+    grain-on-second-dim case ("X by region by month") metric_by_dim_and_grain
+    fires first; this pattern handles the categorical-x-categorical case.
+    Duplicate dimensions are rejected so the user gets a clean no-match
+    instead of a silently-deduped intent."""
+    metric_id = _resolve_metric(m.group(1), schema)
+    dim1_id = _resolve_dimension(m.group(2), schema)
+    dim2_id = _resolve_dimension(m.group(3), schema)
+    if not metric_id or not dim1_id or not dim2_id or dim1_id == dim2_id:
+        raise NoMatch()
+    return {
+        "source": schema.source_id,
+        "metrics": [metric_id],
+        "dimensions": [{"id": dim1_id}, {"id": dim2_id}],
     }
 
 
@@ -656,6 +711,67 @@ def metric_filter_compound(m: re.Match, schema: AllowedSchema) -> dict:
     }
 
 
+@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+where\s+(\w+)\s+between\s+(-?\d+(?:\.\d+)?)\s+and\s+(-?\d+(?:\.\d+)?)$")
+def metric_where_between(m: re.Match, schema: AllowedSchema) -> dict:
+    """<metric> where <column> between A and B -- inclusive range filter
+    on a numeric column.
+
+    Matches the SQL BETWEEN semantics (inclusive on both bounds). The
+    column must exist in the role's AllowedSchema.columns; otherwise
+    NoMatch (no fabrication of unauthorized columns). Numeric bounds
+    only -- date BETWEEN is via metric_in_date_range."""
+    metric_id = _resolve_metric(m.group(1), schema)
+    col_name = _resolve_column(m.group(2), schema)
+    if not metric_id or not col_name:
+        raise NoMatch()
+    lo = float(m.group(3))
+    hi = float(m.group(4))
+    if lo.is_integer():
+        lo = int(lo)
+    if hi.is_integer():
+        hi = int(hi)
+    return {
+        "source": schema.source_id,
+        "metrics": [metric_id],
+        "filters": [{
+            "op": "and",
+            "args": [
+                {"op": "gte", "column": col_name, "value": lo},
+                {"op": "lte", "column": col_name, "value": hi},
+            ],
+        }],
+    }
+
+
+@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+where\s+(\w+)\s+(>=|<=|>|<|=|!=)\s*(-?\d+(?:\.\d+)?)$")
+def metric_where(m: re.Match, schema: AllowedSchema) -> dict:
+    """<metric> where <column> {op} <numeric-value>.
+
+    Generic numeric-column filter using a comparison op. The column
+    must exist in AllowedSchema.columns. Supports >, <, >=, <=, =, !=
+    on numeric literals only -- string equality is handled by
+    metric_filtered_by_value via the example_values inference path.
+
+    Distinct from top_n_with_having's "where" clause (which references
+    a metric in HAVING, not a column in WHERE)."""
+    metric_id = _resolve_metric(m.group(1), schema)
+    col_name = _resolve_column(m.group(2), schema)
+    if not metric_id or not col_name:
+        raise NoMatch()
+    op_text = m.group(3)
+    raw_value = m.group(4)
+    value: int | float = float(raw_value)
+    if value.is_integer():
+        value = int(value)
+    # != maps to "neq" in the AST; the rest are 1:1.
+    op_map = {**_HAVING_OP_MAP, "!=": "neq"}
+    return {
+        "source": schema.source_id,
+        "metrics": [metric_id],
+        "filters": [{"op": op_map[op_text], "column": col_name, "value": value}],
+    }
+
+
 @register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+for\s+(.+)$")
 def metric_filtered_by_value(m: re.Match, schema: AllowedSchema) -> dict:
     """<metric> for <value> -- eq filter on a column whose example_values
@@ -672,6 +788,51 @@ def metric_filtered_by_value(m: re.Match, schema: AllowedSchema) -> dict:
         "source": schema.source_id,
         "metrics": [metric_id],
         "filters": [{"op": "eq", "column": col_name, "value": canonical_value}],
+    }
+
+
+@register(rf"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+({_PERIOD_PHRASE_ALT})$")
+def metric_period_over_period(m: re.Match, schema: AllowedSchema) -> dict:
+    """<metric> {yoy | year over year | vs last year | mom | mom | qoq | ...}
+
+    Route to an existing period_over_period metric matching the named
+    base and period unit. The matcher filters AllowedSchema.metrics to:
+      * metric_type == period_over_period
+      * metric name contains the requested unit (full word like "year"
+        or short code like "yoy")
+      * metric name contains the user's phrase
+
+    Requires a pre-declared period_over_period metric in YAML -- this
+    pattern routes; it does NOT synthesize LAG SQL inline. Users wanting
+    YoY behavior declare a period_over_period metric (see
+    fixtures/gibran.yaml's revenue_mom / revenue_yoy)."""
+    user_phrase = m.group(1).lower().strip()
+    period_phrase = m.group(2).lower()
+    unit = PERIOD_PHRASE_TO_UNIT[period_phrase]
+    unit_short = PERIOD_UNIT_SHORT[unit]
+    candidates: list[tuple[int, str]] = []
+    for metric in schema.metrics:
+        if metric.metric_type != "period_over_period":
+            continue
+        name_lc = (metric.metric_id + " " + metric.display_name).lower()
+        if unit not in name_lc and unit_short not in name_lc:
+            continue
+        if user_phrase in name_lc:
+            candidates.append((len(metric.display_name), metric.metric_id))
+    if not candidates:
+        raise NoMatch()
+    # period_over_period metrics REQUIRE the period_dim at the matching
+    # grain in the intent (dsl.validate enforces this; the compiled SQL's
+    # LAG window orders on DATE_TRUNC(unit, period_col)). Auto-add the
+    # temporal dim at the requested unit's grain. If the schema has no
+    # temporal dim, we can't satisfy that contract -- NoMatch.
+    temporal_dim_id = _resolve_temporal_dim(schema)
+    if temporal_dim_id is None:
+        raise NoMatch()
+    return {
+        "source": schema.source_id,
+        "metrics": [sorted(candidates)[0][1]],
+        "dimensions": [{"id": temporal_dim_id, "grain": unit}],
     }
 
 

@@ -91,6 +91,16 @@ metrics:
     comparison: delta
     unit: USD
     description: Change in gross revenue compared to the prior month.
+  - id: revenue_yoy
+    source: orders
+    display_name: Revenue Year-over-Year
+    type: period_over_period
+    base_metric: gross_revenue
+    period_dim: orders.order_date
+    period_unit: year
+    comparison: delta
+    unit: USD
+    description: Change in gross revenue compared to the prior year.
   - id: customer_retention
     source: orders
     display_name: Customer Retention
@@ -163,6 +173,14 @@ metrics:
     column: amount
     unit: USD
     description: Last order amount by scan order.
+  - id: jan_to_feb_returners
+    source: orders
+    display_name: Jan to Feb Returners
+    type: cohort_filter
+    entity_column: customer_email
+    cohort_condition: "order_date >= '2026-01-01' AND order_date < '2026-02-01' AND status = 'paid'"
+    result_condition: "order_date >= '2026-02-01' AND order_date < '2026-03-01' AND status = 'paid'"
+    description: Customers who placed a paid order in January AND returned with another paid order in February.
 
 roles:
   - id: analyst_west

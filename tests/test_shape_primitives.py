@@ -388,3 +388,108 @@ class TestFunnelEndToEnd:
         rows_by_step = {r[0]: r for r in qr.rows}
         assert rows_by_step["ordered"][2] == 3
         assert rows_by_step["paid"][2] == 3
+
+
+# ---------------------------------------------------------------------------
+# cohort_filter: Pydantic validation
+# ---------------------------------------------------------------------------
+
+class TestCohortFilterValidation:
+    def test_minimum_config_accepted(self) -> None:
+        m = MetricConfig(
+            id="c", source="orders", display_name="C", type="cohort_filter",
+            entity_column="customer_email",
+            cohort_condition="order_date >= '2026-01-01' AND order_date < '2026-02-01'",
+            result_condition="order_date >= '2026-02-01' AND order_date < '2026-03-01'",
+        )
+        assert m.type == "cohort_filter"
+
+    def test_missing_entity_column_rejected(self) -> None:
+        with pytest.raises(ValueError, match="cohort_filter requires"):
+            MetricConfig(
+                id="c", source="orders", display_name="C", type="cohort_filter",
+                cohort_condition="status = 'paid'",
+                result_condition="status = 'paid'",
+            )
+
+    def test_missing_cohort_condition_rejected(self) -> None:
+        with pytest.raises(ValueError, match="cohort_filter requires"):
+            MetricConfig(
+                id="c", source="orders", display_name="C", type="cohort_filter",
+                entity_column="customer_email",
+                # cohort_condition missing
+                result_condition="status = 'paid'",
+            )
+
+    def test_extra_scalar_fields_rejected(self) -> None:
+        with pytest.raises(ValueError, match="cannot have"):
+            MetricConfig(
+                id="c", source="orders", display_name="C", type="cohort_filter",
+                entity_column="customer_email",
+                cohort_condition="status = 'paid'",
+                result_condition="status = 'paid'",
+                expression="amount",
+            )
+
+    def test_cohort_filter_cannot_be_materialized(self) -> None:
+        with pytest.raises(ValueError, match="cannot be materialized"):
+            MetricConfig(
+                id="c", source="orders", display_name="C", type="cohort_filter",
+                entity_column="customer_email",
+                cohort_condition="status = 'paid'",
+                result_condition="status = 'paid'",
+                materialized=[],
+            )
+
+
+# ---------------------------------------------------------------------------
+# cohort_filter: end-to-end query against synthetic data
+# ---------------------------------------------------------------------------
+
+class TestCohortFilterEndToEnd:
+    def test_jan_to_feb_returners_via_fixture_metric(self) -> None:
+        # The fixture metric jan_to_feb_returners filters paid Jan orders
+        # then intersects with paid Feb orders. From _populated_db:
+        #   alice: Jan paid + Feb paid  -> in cohort, in result -> COUNT
+        #   bob:   Jan paid + Feb pending -> in cohort, NOT in result
+        #   carol: Feb paid (no Jan)   -> NOT in cohort
+        # Expected count = 1 (just alice).
+        con = _populated_db()
+        ident, gov = _admin(con)
+        intent = QueryIntent(
+            source="orders", metrics=["jan_to_feb_returners"],
+        )
+        result = run_dsl_query(con, gov, ident, intent.model_dump())
+        assert result.query_result is not None
+        qr = result.query_result
+        assert qr.status == "ok"
+        assert qr.columns == ("jan_to_feb_returners",)
+        assert qr.rows == ((1,),)
+
+    def test_compile_emits_two_ctes(self) -> None:
+        # The compiled SQL should have the cohort + result CTEs and a
+        # COUNT JOIN against them.
+        con = _populated_db()
+        intent = QueryIntent(
+            source="orders", metrics=["jan_to_feb_returners"],
+        )
+        compiled = compile_intent(intent, Catalog(con))
+        cte_names = [c.name for c in compiled.ctes]
+        assert cte_names == ["cohort", "result"]
+        rendered = compiled.render()
+        assert "JOIN result USING" in rendered
+        assert "COUNT(*)" in rendered
+
+    def test_cannot_combine_with_dimensions(self) -> None:
+        # Shape-primitive contract: single metric, no dimensions /
+        # filters / having / order_by. Default ShapePrimitive
+        # validate_intent enforces.
+        con = _populated_db()
+        ident, gov = _admin(con)
+        intent = QueryIntent(
+            source="orders",
+            metrics=["jan_to_feb_returners"],
+            dimensions=[{"id": "orders.region"}],
+        )
+        with pytest.raises(IntentValidationError, match="cannot be combined with intent.dimensions"):
+            validate_intent(intent, gov.preview_schema(ident, "orders"))

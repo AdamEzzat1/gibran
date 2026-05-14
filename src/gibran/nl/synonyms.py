@@ -81,6 +81,35 @@ TYPE_KEYWORDS: dict[str, tuple[str, ...]] = {
 THIS_PERIOD_WORDS: tuple[str, ...] = ("week", "month", "quarter", "year")
 
 
+# Period-over-period phrasings. Each maps a user-language phrase to the
+# canonical period unit it implies. The metric_period_over_period pattern
+# uses this to route "<metric> yoy" or "<metric> vs last year" to a
+# period_over_period metric whose name hints at the year unit (and to
+# distinguish from monthly/quarterly variants). Order matters at the
+# regex level -- longer phrases must alternate FIRST so "year over year"
+# isn't shadowed by "year".
+PERIOD_PHRASE_TO_UNIT: dict[str, str] = {
+    "year over year":     "year",
+    "vs last year":       "year",
+    "yoy":                "year",
+    "quarter over quarter": "quarter",
+    "vs last quarter":    "quarter",
+    "qoq":                "quarter",
+    "month over month":   "month",
+    "vs last month":      "month",
+    "mom":                "month",
+}
+
+
+# Short codes for each unit -- used by the matcher to look for hints
+# in metric names (e.g. a "revenue_yoy" metric_id signals year-unit).
+PERIOD_UNIT_SHORT: dict[str, str] = {
+    "year":    "yoy",
+    "quarter": "qoq",
+    "month":   "mom",
+}
+
+
 # Month-name lookup -- full English names plus standard 3-letter
 # abbreviations (and "sept" since it shows up in real text). Used by
 # metric_in_period to resolve a month word to its 1-12 integer.
