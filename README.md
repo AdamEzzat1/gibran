@@ -245,6 +245,164 @@ Notably absent: `like`, `regex`, function calls. A future "approved
 functions" registry can extend, but the whitelist closes a class of
 SQL-injection-via-policy-author bugs by construction.
 
+## Primitive reference: declarative YAML → compiled SQL
+
+Each metric primitive in `gibran.yaml` compiles to a specific DuckDB
+SQL shape. The user surface stays declarative; the SQL underneath is
+non-trivial — window functions, recursive composition, governance-
+injected WHERE clauses. This section pairs each primitive's YAML
+declaration with the SQL it generates.
+
+### `rolling_window` — sliding-window aggregate
+
+```yaml
+metrics:
+  - id: revenue_7d_rolling
+    type: rolling_window
+    aggregate: sum                  # sum | avg | min | max | count
+    column: amount
+    window: "7 days"                # DuckDB INTERVAL
+    order_by_column: order_date
+    filter: "status = 'paid'"       # optional FILTER (WHERE …)
+    partition_by: [region]          # optional PARTITION BY
+```
+
+Compiles to:
+
+```sql
+SUM(amount) FILTER (WHERE status = 'paid')
+  OVER (PARTITION BY region
+        ORDER BY order_date
+        RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW)
+```
+
+Per-row trailing-window aggregate. The result has one row per input
+row, not one per group. V1 constraint: cannot be combined with
+intent-level `dimensions` — the window is row-level, not group-level.
+
+### `period_over_period` — month-over-month / quarter-over-quarter / YoY
+
+```yaml
+metrics:
+  - id: revenue_mom
+    type: period_over_period
+    base_metric: gross_revenue       # composes an existing metric
+    period_dim: orders.order_date
+    period_unit: month               # year | quarter | month | week | day
+    comparison: delta                # delta | ratio | pct_change
+```
+
+Compiles to (for `comparison: delta`):
+
+```sql
+(SUM(amount) FILTER (WHERE status = 'paid'))
+- LAG((SUM(amount) FILTER (WHERE status = 'paid')))
+    OVER (ORDER BY DATE_TRUNC('month', order_date))
+```
+
+For `comparison: ratio` the divisor is wrapped in `NULLIF(LAG(...) OVER (...), 0)`.
+For `comparison: pct_change` the whole shape is `(BASE - LAG(BASE)) / NULLIF(LAG(BASE), 0)`.
+
+Change-over-time analytics. Requires the intent's `dimensions` to
+include the `period_dim` at matching grain — the DSL validator enforces
+this at compile time.
+
+### `percentile` — quantile-as-aggregate
+
+```yaml
+metrics:
+  - id: p95_amount
+    type: percentile
+    column: amount
+    p: 0.95                          # 0 < p < 1
+```
+
+Compiles to:
+
+```sql
+QUANTILE_CONT(amount, 0.95)
+```
+
+Standard aggregate; composes inside `GROUP BY` just like `SUM` / `AVG`.
+
+### `ratio` — composes two metrics
+
+```yaml
+metrics:
+  - id: order_count
+    type: count
+  - id: gross_revenue
+    type: sum
+    expression: amount
+    filter: "status = 'paid'"
+  - id: avg_order_value
+    type: ratio
+    numerator: gross_revenue         # references other metrics by id
+    denominator: order_count
+```
+
+Compiles to:
+
+```sql
+(SUM(amount) FILTER (WHERE status = 'paid')) / NULLIF(COUNT(*), 0)
+```
+
+Any rate / per-X metric. The compiler resolves the numerator and
+denominator expressions recursively; cycle detection prevents
+`metric_a / metric_b / metric_a` loops at sync time.
+
+### `expression` — templated metric reference
+
+```yaml
+metrics:
+  - id: revenue_per_paid_order
+    type: expression
+    expression: "{gross_revenue} / NULLIF({order_count}, 0)"
+```
+
+Compiles to:
+
+```sql
+(SUM(amount) FILTER (WHERE status = 'paid')) / NULLIF(COUNT(*), 0)
+```
+
+Ad-hoc compositions that don't fit the `ratio` shape (e.g.
+`{a} - {b}`, `{a} * 100`, multi-term arithmetic). `{metric_id}`
+placeholders are resolved recursively with the same cycle detection as
+`ratio`.
+
+### Identity-aware row filtering — policy AST → injected WHERE clause
+
+```yaml
+roles:
+  - id: analyst_west
+    attributes:
+      region: west
+
+policies:
+  - id: analyst_west_orders
+    role: analyst_west
+    source: orders
+    row_filter:                      # AST — operator whitelist enforced
+      op: eq
+      column: region
+      value: { $attr: region }       # resolved from identity at evaluate time
+```
+
+Given a query `SELECT amount FROM orders` from `analyst_west`, the
+governance layer compiles `row_filter` with the identity's attributes
+and rewrites the query via sqlglot:
+
+```sql
+SELECT amount FROM orders WHERE ("region" = 'west')
+```
+
+Same query from `analyst_east` (with `attributes: { region: east }`)
+would inject `WHERE region = 'east'` instead — same SQL the user
+wrote, two different row sets, no application-level branching. The
+`{ $attr: <key> }` substitution is policy-only; DSL filters reject it
+by function signature in [src/gibran/governance/ast.py](src/gibran/governance/ast.py).
+
 ## Worked example: same query, two roles, two outcomes
 
 ```bash
