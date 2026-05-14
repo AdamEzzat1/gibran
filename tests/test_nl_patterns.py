@@ -477,6 +477,53 @@ class TestMetricFilteredByValue:
 
 
 # ---------------------------------------------------------------------------
+# Pattern: metric_distribution
+# ---------------------------------------------------------------------------
+
+class TestMetricDistribution:
+    def test_percentile_metric_resolves(self) -> None:
+        # p95_amount is type=percentile in the fixture -- routes here.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("p95_amount distribution", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["p95_amount"]
+        assert m.intent.get("dimensions", []) == []
+        assert m.intent.get("filters", []) == []
+
+    def test_display_name_resolves(self) -> None:
+        # "P95 Order Amount" is p95_amount's display_name.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("P95 Order Amount distribution", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["p95_amount"]
+
+    def test_show_me_prefix(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("show me p95_amount distribution", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["p95_amount"]
+
+    def test_non_distribution_metric_returns_none(self) -> None:
+        # gross_revenue is type=sum -- the metric resolves, but the
+        # pattern raises NoMatch because the type isn't median or
+        # percentile. Falls through to single_metric, which returns the
+        # bare metric (no shape change). The pattern's job is to refuse
+        # to fabricate a "distribution" for a non-distribution metric;
+        # it lets bare metric pass since "gross revenue distribution" as
+        # text is still a recognizable metric reference.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue distribution", schema)
+        # Falls through to single_metric -- which fails because
+        # "gross revenue distribution" isn't a valid metric phrase.
+        assert m is None
+
+    def test_unresolvable_returns_none(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("bogus_metric distribution", schema)
+        assert m is None
+
+
+# ---------------------------------------------------------------------------
 # Pattern: single_metric (catch-all)
 # ---------------------------------------------------------------------------
 

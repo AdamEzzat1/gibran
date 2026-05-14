@@ -445,6 +445,29 @@ def metric_filtered_by_value(m: re.Match, schema: AllowedSchema) -> dict:
     }
 
 
+@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+distribution$")
+def metric_distribution(m: re.Match, schema: AllowedSchema) -> dict:
+    """<metric> distribution -- returns the named metric IF its type is
+    median or percentile. Otherwise NoMatch.
+
+    Phase 1 contract: returns a single summary statistic (the median or
+    percentile value), not a full distribution shape. A proper
+    "p10/p25/p50/p75/p90 in one query" output requires a new multi-row
+    shape primitive, which is deferred to Phase 2A per the roadmap's
+    stop-doing list (no new shape primitives on top of the current
+    branch hack)."""
+    metric_id = _resolve_metric(m.group(1), schema)
+    if not metric_id:
+        raise NoMatch()
+    for metric in schema.metrics:
+        if (
+            metric.metric_id == metric_id
+            and metric.metric_type in ("median", "percentile")
+        ):
+            return {"source": schema.source_id, "metrics": [metric_id]}
+    raise NoMatch()
+
+
 @register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+)$")
 def single_metric(m: re.Match, schema: AllowedSchema) -> dict:
     """Bare metric reference -- the most permissive pattern, registered
