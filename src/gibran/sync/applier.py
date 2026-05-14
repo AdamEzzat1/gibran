@@ -384,6 +384,28 @@ def _render_expression(m: MetricConfig) -> str:
         # FILTER + GROUP BY uniformly.
         assert m.column is not None
         return f"MODE({m.column})"
+    if m.type == "variance":
+        # DuckDB's VAR_SAMP -- sample variance. Pairs with stddev_samp
+        # (population variance is available via stddev_pop if needed; we
+        # default to sample variance since most analytics use cases are
+        # sample-based and matching stddev_samp's default is least surprising).
+        assert m.expression is not None
+        return f"VAR_SAMP({m.expression})"
+    if m.type == "median":
+        # DuckDB's MEDIAN -- equivalent to QUANTILE_CONT(column, 0.5)
+        # but more readable in generated SQL. Composes with FILTER + GROUP BY.
+        assert m.column is not None
+        return f"MEDIAN({m.column})"
+    if m.type in ("first_value", "last_value"):
+        # DuckDB's FIRST / LAST aggregates (NOT the FIRST_VALUE / LAST_VALUE
+        # window functions, which require an OVER clause). Without an
+        # explicit ORDER BY the result depends on row order -- DuckDB makes
+        # no guarantee. V1 contract: user takes responsibility for ordering
+        # via materialized config or by querying a pre-sorted view; Phase 3
+        # may add an order_by_column option here.
+        assert m.column is not None
+        func = "FIRST" if m.type == "first_value" else "LAST"
+        return f"{func}({m.column})"
     if m.type == "rolling_window":
         # SQL grammar for window-aggregate-with-filter requires:
         #   aggregate(args) [FILTER (WHERE cond)] OVER (window_spec)

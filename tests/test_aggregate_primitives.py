@@ -174,3 +174,115 @@ class TestMode:
         # blue appears 3x, red 2x -> mode is blue
         result = con.execute("SELECT MODE(label) FROM widgets").fetchone()[0]
         assert result == "blue"
+
+
+# ---------------------------------------------------------------------------
+# variance (Phase 1 Task 1.10)
+# ---------------------------------------------------------------------------
+
+class TestVariance:
+    def test_variance_renders(self) -> None:
+        m = MetricConfig(
+            id="m", source="s", display_name="m", type="variance",
+            expression="value",
+        )
+        assert _render_expression(m) == "VAR_SAMP(value)"
+
+    def test_variance_requires_expression(self) -> None:
+        with pytest.raises(ValueError, match="variance requires"):
+            MetricConfig(
+                id="m", source="s", display_name="m", type="variance",
+            )
+
+    def test_variance_rejects_numerator(self) -> None:
+        with pytest.raises(ValueError, match="cannot have numerator"):
+            MetricConfig(
+                id="m", source="s", display_name="m", type="variance",
+                expression="value", numerator="value",
+            )
+
+    def test_variance_executes(self) -> None:
+        con = _src_with_widget_table()
+        result = con.execute("SELECT VAR_SAMP(value) FROM widgets").fetchone()[0]
+        # values: [10, 20, 30, 30, 30], mean = 24
+        # sum_sq_dev = (10-24)^2 + (20-24)^2 + 3*(30-24)^2 = 196 + 16 + 108 = 320
+        # var_samp = 320 / (5 - 1) = 80.0
+        assert abs(result - 80.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# median (Phase 1 Task 1.10)
+# ---------------------------------------------------------------------------
+
+class TestMedian:
+    def test_median_renders(self) -> None:
+        m = MetricConfig(
+            id="m", source="s", display_name="m", type="median", column="value",
+        )
+        assert _render_expression(m) == "MEDIAN(value)"
+
+    def test_median_requires_column(self) -> None:
+        with pytest.raises(ValueError, match="median requires"):
+            MetricConfig(
+                id="m", source="s", display_name="m", type="median",
+            )
+
+    def test_median_rejects_expression(self) -> None:
+        with pytest.raises(ValueError, match="cannot have"):
+            MetricConfig(
+                id="m", source="s", display_name="m", type="median",
+                column="value", expression="value",
+            )
+
+    def test_median_executes(self) -> None:
+        con = _src_with_widget_table()
+        # sorted values [10, 20, 30, 30, 30] -> middle (index 2) is 30
+        result = con.execute("SELECT MEDIAN(value) FROM widgets").fetchone()[0]
+        assert result == 30.0
+
+
+# ---------------------------------------------------------------------------
+# first_value, last_value (Phase 1 Task 1.10)
+# ---------------------------------------------------------------------------
+
+class TestFirstLast:
+    def test_first_value_renders(self) -> None:
+        m = MetricConfig(
+            id="m", source="s", display_name="m", type="first_value",
+            column="value",
+        )
+        assert _render_expression(m) == "FIRST(value)"
+
+    def test_last_value_renders(self) -> None:
+        m = MetricConfig(
+            id="m", source="s", display_name="m", type="last_value",
+            column="value",
+        )
+        assert _render_expression(m) == "LAST(value)"
+
+    def test_first_value_requires_column(self) -> None:
+        with pytest.raises(ValueError, match="first_value requires"):
+            MetricConfig(
+                id="m", source="s", display_name="m", type="first_value",
+            )
+
+    def test_last_value_requires_column(self) -> None:
+        with pytest.raises(ValueError, match="last_value requires"):
+            MetricConfig(
+                id="m", source="s", display_name="m", type="last_value",
+            )
+
+    def test_first_value_executes(self) -> None:
+        # Without ORDER BY, DuckDB returns the first row in scan order.
+        # For an in-memory table, that's insertion order -- so the first
+        # value is 10. This is documented in the applier as a V1 contract:
+        # caller is responsible for ordering. The test pins the current
+        # behavior so any future ORDER BY support is a deliberate change.
+        con = _src_with_widget_table()
+        result = con.execute("SELECT FIRST(value) FROM widgets").fetchone()[0]
+        assert result == 10
+
+    def test_last_value_executes(self) -> None:
+        con = _src_with_widget_table()
+        result = con.execute("SELECT LAST(value) FROM widgets").fetchone()[0]
+        assert result == 30

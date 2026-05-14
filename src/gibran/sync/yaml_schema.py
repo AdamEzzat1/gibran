@@ -52,6 +52,8 @@ MetricType = Literal[
     # Aggregate primitives (Tier 2 Item 5):
     "weighted_avg", "stddev_samp", "stddev_pop",
     "count_distinct", "count_distinct_approx", "mode",
+    # Phase 1 Task 1.10 additions:
+    "variance", "first_value", "last_value", "median",
 ]
 
 RollingAggregate = Literal["sum", "avg", "min", "max", "count"]
@@ -101,7 +103,7 @@ class MetricConfig(_Strict):
                 f"materialized in V1 (only direct aggregates: count / "
                 f"sum / avg / min / max / percentile / count_distinct / "
                 f"count_distinct_approx / stddev_samp / stddev_pop / mode "
-                f"/ weighted_avg)"
+                f"/ weighted_avg / variance / first_value / last_value / median)"
             )
         return self
 
@@ -329,7 +331,7 @@ class MetricConfig(_Strict):
                 raise ValueError(
                     f"metric {self.id!r}: weighted_avg cannot have numerator/denominator"
                 )
-        elif self.type in ("stddev_samp", "stddev_pop"):
+        elif self.type in ("stddev_samp", "stddev_pop", "variance"):
             if not self.expression:
                 raise ValueError(
                     f"metric {self.id!r}: {self.type} requires `expression`"
@@ -338,7 +340,10 @@ class MetricConfig(_Strict):
                 raise ValueError(
                     f"metric {self.id!r}: {self.type} cannot have numerator/denominator"
                 )
-        elif self.type in ("count_distinct", "count_distinct_approx", "mode"):
+        elif self.type in (
+            "count_distinct", "count_distinct_approx", "mode",
+            "first_value", "last_value", "median",
+        ):
             if self.column is None:
                 raise ValueError(
                     f"metric {self.id!r}: {self.type} requires `column`"
