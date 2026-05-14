@@ -202,6 +202,41 @@ def register() -> None:
 
 
 @app.command()
+def touch(
+    source_id: str = typer.Argument(
+        ..., help="ID of the source whose cached results should be invalidated.",
+    ),
+) -> None:
+    """Bump the data-version token for a source, invalidating cached results.
+
+    Useful after writing to a `duckdb_table` source externally (a script,
+    another process, an upstream pipeline) so subsequent queries re-execute
+    against the new data instead of serving stale rows from the result cache.
+
+    For `parquet` and `csv` sources this is a no-op: the file's mtime is the
+    authoritative version token. Rewrite the file and the cache invalidates
+    automatically on the next query.
+    """
+    from gibran._source_dispatch import SourceDispatchError, touch_source
+
+    root = _project_root()
+    db = _db_path(root)
+    if not db.exists():
+        typer.echo(f"error: no DB at {db}", err=True)
+        raise typer.Exit(code=1)
+    con = duckdb.connect(str(db))
+    try:
+        version = touch_source(con, source_id)
+    except SourceDispatchError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=1)
+    finally:
+        con.close()
+    # Show only a short prefix of the version token -- full uuids are noise.
+    typer.echo(f"touched {source_id}: version={version[:12]}")
+
+
+@app.command()
 def check(
     source: str = typer.Option(
         None, "--source", "-s",

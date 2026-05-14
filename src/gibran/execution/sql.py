@@ -120,7 +120,9 @@ def run_sql_query(
     cache_key = None
     cached = None
     if use_cache:
-        cache_key, cached = _cache_lookup(con, rewritten, identity)
+        cache_key, cached = _cache_lookup(
+            con, rewritten, identity, source_id=source_id,
+        )
 
     if cached is not None:
         rows = list(cached.rows)

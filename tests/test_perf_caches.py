@@ -171,6 +171,11 @@ class TestResultCache:
         # run_sql_query's return value, but we CAN observe by mutating
         # the underlying source between calls -- the cached result
         # should NOT reflect the new row.
+        #
+        # Phase 2B contract: this only holds because we don't call
+        # `gibran touch orders` between mutations. A touch would invalidate
+        # the cache and the second query would return 4. See
+        # TestDataVersionInvalidation below.
         con = _populated_db()
         ident = _admin(con)
         gov = DefaultGovernance(con)
@@ -191,6 +196,135 @@ class TestResultCache:
         # Cached: returns the original row count of 3 even though the
         # source now has 4 rows.
         assert second.rows == ((3,),)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2B: data-version tracking closes the stale-cache hole
+# ---------------------------------------------------------------------------
+
+class TestDataVersionInvalidation:
+    def test_duckdb_table_initial_version_is_zero(self) -> None:
+        # An un-touched source has no row in gibran_table_versions and
+        # source_data_version returns the sentinel "0".
+        from gibran._source_dispatch import source_data_version
+
+        con = _populated_db()
+        assert source_data_version(con, "orders") == "0"
+
+    def test_touch_bumps_duckdb_table_version(self) -> None:
+        from gibran._source_dispatch import source_data_version, touch_source
+
+        con = _populated_db()
+        v0 = source_data_version(con, "orders")
+        v1 = touch_source(con, "orders")
+        assert v0 != v1
+        # Re-touching produces yet another version.
+        v2 = touch_source(con, "orders")
+        assert v1 != v2
+        # The reader now sees the latest token.
+        assert source_data_version(con, "orders") == v2
+
+    def test_touch_parquet_returns_mtime_no_table_versions_row(
+        self, tmp_path
+    ) -> None:
+        # parquet uses file mtime as version; touch is a no-op (returns
+        # the mtime without inserting into gibran_table_versions).
+        from gibran._source_dispatch import source_data_version, touch_source
+
+        con = _populated_db()
+        parquet = tmp_path / "pq_test.parquet"
+        con.execute(f"COPY (SELECT 1 AS x) TO '{parquet}' (FORMAT PARQUET)")
+        con.execute(
+            "INSERT INTO gibran_sources "
+            "(source_id, display_name, source_type, uri, primary_grain) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ["pq_test", "PQ Test", "parquet", str(parquet), None],
+        )
+        v1 = source_data_version(con, "pq_test")
+        v2 = touch_source(con, "pq_test")
+        assert v1 == v2  # touch was a no-op
+        # No row inserted into table_versions for parquet sources.
+        n = con.execute(
+            "SELECT COUNT(*) FROM gibran_table_versions WHERE source_id = 'pq_test'"
+        ).fetchone()[0]
+        assert n == 0
+
+    def test_parquet_mtime_bump_changes_data_version(self, tmp_path) -> None:
+        # Bump the file mtime via os.utime without rewriting contents --
+        # the cache should treat that as a data change.
+        import os
+        import time
+        from gibran._source_dispatch import source_data_version
+
+        con = _populated_db()
+        parquet = tmp_path / "pq_test.parquet"
+        con.execute(f"COPY (SELECT 1 AS x) TO '{parquet}' (FORMAT PARQUET)")
+        con.execute(
+            "INSERT INTO gibran_sources "
+            "(source_id, display_name, source_type, uri, primary_grain) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ["pq_test", "PQ Test", "parquet", str(parquet), None],
+        )
+        v1 = source_data_version(con, "pq_test")
+        # Bump mtime by 1 second forward (some filesystems have 1-second
+        # mtime resolution; nanoseconds aren't always reliable).
+        time.sleep(0.01)
+        new_mtime = os.stat(parquet).st_mtime + 1
+        os.utime(parquet, (new_mtime, new_mtime))
+        v2 = source_data_version(con, "pq_test")
+        assert v1 != v2
+
+    def test_sql_view_uses_table_versions_not_recursive(self) -> None:
+        # V1 contract: sql_view sources are treated like duckdb_table for
+        # version lookup (manual touch required). Recursive derivation
+        # from the view's underlying tables is Phase 3 work.
+        from gibran._source_dispatch import source_data_version, touch_source
+
+        con = _populated_db()
+        # Pretend "orders" is registered as sql_view by patching the
+        # source row; the data hasn't changed, only the source_type metadata.
+        con.execute(
+            "UPDATE gibran_sources SET source_type = 'sql_view' "
+            "WHERE source_id = 'orders'"
+        )
+        assert source_data_version(con, "orders") == "0"
+        # A manual touch bumps the version, same as duckdb_table.
+        v1 = touch_source(con, "orders")
+        assert source_data_version(con, "orders") == v1
+        # But mutating the underlying data (a real INSERT) does NOT bump
+        # the version -- that's the documented V1 limitation.
+        con.execute(
+            "INSERT INTO orders VALUES "
+            "('o4', 99, TIMESTAMP '2026-03-01', 'paid', 'west', 'd@x')"
+        )
+        assert source_data_version(con, "orders") == v1
+
+    def test_touch_unknown_source_raises(self) -> None:
+        from gibran._source_dispatch import SourceDispatchError, touch_source
+
+        con = _populated_db()
+        with pytest.raises(SourceDispatchError, match="unknown source"):
+            touch_source(con, "nonexistent")
+
+    def test_end_to_end_touch_invalidates_cache(self) -> None:
+        # Companion to TestResultCache.test_end_to_end_cache_hit_skips_execute:
+        # WITH a touch between mutations, the cache invalidates and the
+        # second query reflects the new row.
+        from gibran._source_dispatch import touch_source
+
+        con = _populated_db()
+        ident = _admin(con)
+        gov = DefaultGovernance(con)
+        first = run_sql_query(con, gov, ident, "SELECT COUNT(*) AS n FROM orders")
+        assert first.rows == ((3,),)
+        con.execute(
+            "INSERT INTO orders VALUES "
+            "('o4', 99, TIMESTAMP '2026-03-01', 'paid', 'west', 'd@x')"
+        )
+        touch_source(con, "orders")
+        second = run_sql_query(con, gov, ident, "SELECT COUNT(*) AS n FROM orders")
+        # The touch invalidated the cache; the new query sees 4 rows.
+        assert second.rows == ((4,),)
 
 
 # ---------------------------------------------------------------------------
