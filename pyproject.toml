@@ -3,10 +3,36 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "rumi"
+name = "gibran"
 version = "0.0.1"
-description = "Governed analytics + NL-to-SQL over DuckDB."
+description = "Rumi: governed analytics + metric layer over DuckDB. YAML-defined sources/metrics/policies; queries flow through an identity-aware governance layer that rewrites and audits every attempt."
+readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Adam Ezzat" }]
+keywords = [
+    "analytics",
+    "metric-layer",
+    "semantic-layer",
+    "governance",
+    "duckdb",
+    "sql",
+    "dsl",
+    "audit",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "duckdb>=1.0",
     "pyyaml>=6.0",
@@ -19,6 +45,15 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
+[project.urls]
+Homepage = "https://github.com/AdamEzzat1/rumi"
+Repository = "https://github.com/AdamEzzat1/rumi"
+Issues = "https://github.com/AdamEzzat1/rumi/issues"
+
+# The product is named Rumi; the PyPI distribution is `gibran` because
+# the `rumi` name on PyPI is held by another project. The CLI command
+# and import path remain `rumi` -- `pip install gibran` gives you
+# `import rumi` and a `rumi` console script.
 [project.scripts]
 rumi = "rumi.cli.main:app"
 
