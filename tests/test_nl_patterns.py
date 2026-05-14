@@ -142,6 +142,60 @@ class TestTopN:
         assert m.intent["metrics"] == ["gross_revenue"]
         assert m.intent["order_by"][0]["direction"] == "desc"
 
+    def test_biggest_synonym(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("biggest 3 region by gross revenue", schema)
+        assert m is not None
+        assert m.intent["limit"] == 3
+        assert m.intent["order_by"][0]["direction"] == "desc"
+
+    def test_largest_synonym(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("largest 2 region by gross revenue", schema)
+        assert m is not None
+        assert m.intent["limit"] == 2
+
+    def test_highest_synonym(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("highest 10 region by gross revenue", schema)
+        assert m is not None
+        assert m.intent["order_by"][0]["direction"] == "desc"
+
+
+# ---------------------------------------------------------------------------
+# Pattern: bottom_n_by_metric
+# ---------------------------------------------------------------------------
+
+class TestBottomN:
+    def test_bottom_n(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("bottom 5 region by gross revenue", schema)
+        assert m is not None
+        assert m.intent["limit"] == 5
+        assert m.intent["metrics"] == ["gross_revenue"]
+        assert m.intent["dimensions"] == [{"id": "orders.region"}]
+        # Key distinction from top_n: ASC instead of DESC.
+        assert m.intent["order_by"][0]["direction"] == "asc"
+        assert m.intent["order_by"][0]["key"] == "gross_revenue"
+
+    def test_smallest_synonym(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("smallest 3 region by gross revenue", schema)
+        assert m is not None
+        assert m.intent["order_by"][0]["direction"] == "asc"
+
+    def test_lowest_synonym(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("lowest 1 region by gross revenue", schema)
+        assert m is not None
+        assert m.intent["limit"] == 1
+
+    def test_unresolvable_dim_returns_none(self) -> None:
+        # bogus dim -- pattern raises NoMatch, falls through, eventually None.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("bottom 5 bogus_dim by gross revenue", schema)
+        assert m is None
+
 
 # ---------------------------------------------------------------------------
 # Pattern: metric_in_period

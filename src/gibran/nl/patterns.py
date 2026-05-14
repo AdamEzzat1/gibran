@@ -170,9 +170,9 @@ def register(pattern_str: str):
 # Patterns -- ordered from most specific to most general
 # ---------------------------------------------------------------------------
 
-@register(r"^top\s+(\d+)\s+(.+?)\s+by\s+(.+)$")
+@register(r"^(?:top|biggest|largest|highest)\s+(\d+)\s+(.+?)\s+by\s+(.+)$")
 def top_n_by_metric(m: re.Match, schema: AllowedSchema) -> dict:
-    """top 10 customers by revenue -- ORDER BY metric DESC LIMIT N."""
+    """top|biggest|largest|highest 10 <dim> by <metric> -- ORDER BY DESC LIMIT N."""
     n = int(m.group(1))
     dim_id = _resolve_dimension(m.group(2), schema)
     metric_id = _resolve_metric(m.group(3), schema)
@@ -183,6 +183,30 @@ def top_n_by_metric(m: re.Match, schema: AllowedSchema) -> dict:
         "metrics": [metric_id],
         "dimensions": [{"id": dim_id}],
         "order_by": [{"key": metric_id, "direction": "desc"}],
+        "limit": n,
+    }
+
+
+@register(r"^(?:bottom|smallest|lowest|fewest|least)\s+(\d+)\s+(.+?)\s+by\s+(.+)$")
+def bottom_n_by_metric(m: re.Match, schema: AllowedSchema) -> dict:
+    """bottom|smallest|lowest|fewest|least 5 <dim> by <metric> -- ORDER BY ASC LIMIT N.
+
+    Mirror of top_n_by_metric: identical shape, ASC instead of DESC. Worth
+    noting: ASC puts NULLs first in DuckDB (per SQL standard), so a metric
+    that's NULL for some dims will surface those rows at the bottom. That's
+    usually what the user means ("show me the worst performers") but is
+    sometimes surprising. No special-casing here -- callers can add an
+    IS NOT NULL filter if they want strict numeric-ordering."""
+    n = int(m.group(1))
+    dim_id = _resolve_dimension(m.group(2), schema)
+    metric_id = _resolve_metric(m.group(3), schema)
+    if not dim_id or not metric_id:
+        raise NoMatch()
+    return {
+        "source": schema.source_id,
+        "metrics": [metric_id],
+        "dimensions": [{"id": dim_id}],
+        "order_by": [{"key": metric_id, "direction": "asc"}],
         "limit": n,
     }
 
