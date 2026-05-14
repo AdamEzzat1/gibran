@@ -75,6 +75,9 @@ class TestCountOfThing:
         assert m is not None
         assert m.intent["metrics"] == ["order_count"]
         assert "dimensions" not in m.intent or m.intent["dimensions"] == []
+        # No filter -- this is the bare-form path. The 2-word adjective
+        # form goes through count_with_condition.
+        assert "filters" not in m.intent or m.intent["filters"] == []
 
     def test_how_many_orders(self) -> None:
         schema = _schema(_populated_db())
@@ -86,6 +89,44 @@ class TestCountOfThing:
         schema = _schema(_populated_db())
         m = nl_to_intent("total orders", schema)
         assert m is not None
+
+
+# ---------------------------------------------------------------------------
+# Pattern: count_with_condition
+# ---------------------------------------------------------------------------
+
+class TestCountWithCondition:
+    def test_count_of_paid_orders(self) -> None:
+        # "paid" is in status column's example_values after populate_example_values.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("count of paid orders", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["order_count"]
+        assert m.intent["filters"] == [
+            {"op": "eq", "column": "status", "value": "paid"},
+        ]
+
+    def test_how_many_paid_orders(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("how many paid orders", schema)
+        assert m is not None
+        assert m.intent["filters"][0]["column"] == "status"
+
+    def test_total_paid_orders(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("total paid orders", schema)
+        assert m is not None
+        assert m.intent["filters"][0]["value"] == "paid"
+
+    def test_unrecognized_condition_falls_through_to_bare_count(self) -> None:
+        # "bogus" isn't in any example_values -- count_with_condition
+        # raises NoMatch, count_of_thing catches the same input as
+        # ".+" and returns the bare count (no filter).
+        schema = _schema(_populated_db())
+        m = nl_to_intent("count of bogus orders", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["order_count"]
+        assert "filters" not in m.intent or m.intent["filters"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +347,43 @@ class TestMetricInPeriod:
         # column, and Decimal('50.00') == 50 is True via numeric coercion.
         assert len(qr.rows) == 1
         assert qr.rows[0][0] == 50
+
+
+# ---------------------------------------------------------------------------
+# Pattern: metric_excluding_value (uses example_values, emits neq)
+# ---------------------------------------------------------------------------
+
+class TestMetricExcludingValue:
+    def test_excluding_value(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue excluding paid", schema)
+        assert m is not None
+        assert m.intent["filters"] == [
+            {"op": "neq", "column": "status", "value": "paid"},
+        ]
+
+    def test_excluding_value_with_trailing_noun(self) -> None:
+        # The optional trailing noun is matched but discarded -- both
+        # phrasings produce the same filter.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue excluding paid orders", schema)
+        assert m is not None
+        assert m.intent["filters"][0] == {
+            "op": "neq", "column": "status", "value": "paid",
+        }
+
+    def test_show_me_prefix(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("show me gross revenue excluding paid orders", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["gross_revenue"]
+
+    def test_unrecognized_value_returns_none(self) -> None:
+        # "bogus" isn't an example value -- pattern raises NoMatch and
+        # nothing else matches. Tier 5 invariant: no fabrication.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue excluding bogus", schema)
+        assert m is None
 
 
 # ---------------------------------------------------------------------------

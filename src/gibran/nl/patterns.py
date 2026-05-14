@@ -147,6 +147,26 @@ def _resolve_column(name: str, schema: AllowedSchema) -> str | None:
     return None
 
 
+def _find_column_by_example_value(
+    value: str, schema: AllowedSchema
+) -> tuple[str, str] | None:
+    """Find a column whose example_values contain `value` (case-insensitive).
+    Returns (column_name, canonical_value_from_examples) or None.
+
+    Shared by patterns that infer "which column does this value belong to?"
+    from the populated example_values (status='paid' -> status column;
+    region='west' -> region column). Without populated example_values
+    these patterns are inert by design -- no inference, no fabrication."""
+    v = value.lower()
+    for c in schema.columns:
+        if not c.example_values:
+            continue
+        for ev in c.example_values:
+            if ev.lower() == v:
+                return c.name, ev
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Pattern registry
 # ---------------------------------------------------------------------------
@@ -298,6 +318,34 @@ def metric_in_period(m: re.Match, schema: AllowedSchema) -> dict:
     }
 
 
+@register(r"^(?:count(?:\s+of)?|how many|total)\s+(\w+)\s+(?:\w+)$")
+def count_with_condition(m: re.Match, schema: AllowedSchema) -> dict:
+    """count of <adjective> <noun> -- count metric with eq filter on the
+    column whose example_values contain <adjective>.
+
+    Example: "count of paid orders" -> count metric + status='paid'. The
+    trailing noun ("orders") is user context, not part of the filter.
+
+    Registered BEFORE count_of_thing so multi-word forms route here first;
+    if the adjective doesn't resolve to a known example value, this raises
+    NoMatch and count_of_thing handles the bare form."""
+    adjective = m.group(1)
+    found = _find_column_by_example_value(adjective, schema)
+    if found is None:
+        raise NoMatch()
+    col_name, canonical_value = found
+    for metric in schema.metrics:
+        if metric.metric_type == "count":
+            return {
+                "source": schema.source_id,
+                "metrics": [metric.metric_id],
+                "filters": [
+                    {"op": "eq", "column": col_name, "value": canonical_value},
+                ],
+            }
+    raise NoMatch()
+
+
 @register(r"^(?:count(?:\s+of)?|how many|total)\s+(.+)$")
 def count_of_thing(m: re.Match, schema: AllowedSchema) -> dict:
     """count of <source>, how many orders, total customers.
@@ -308,29 +356,42 @@ def count_of_thing(m: re.Match, schema: AllowedSchema) -> dict:
     raise NoMatch()
 
 
-@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+for\s+(.+)$")
-def metric_filtered_by_value(m: re.Match, schema: AllowedSchema) -> dict:
-    """<metric> for <value> -- filter on a column whose values plausibly
-    contain <value>. V1 strategy: find any column whose example_values
-    contain the literal value (case-insensitive). Without example_values
-    this pattern is inert."""
+@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+excluding\s+(\w+)(?:\s+\w+)?$")
+def metric_excluding_value(m: re.Match, schema: AllowedSchema) -> dict:
+    """<metric> excluding <value> [<noun>] -- neq filter on the column
+    whose example_values contain <value>. The optional trailing noun
+    ("orders" in "excluding refunded orders") is matched but discarded
+    -- it's user context, not part of the filter."""
     metric_id = _resolve_metric(m.group(1), schema)
     if not metric_id:
         raise NoMatch()
-    value = m.group(2).strip()
-    target_col = None
-    for c in schema.columns:
-        if c.example_values and any(
-            value.lower() == ev.lower() for ev in c.example_values
-        ):
-            target_col = c.name
-            break
-    if target_col is None:
+    found = _find_column_by_example_value(m.group(2).strip(), schema)
+    if found is None:
         raise NoMatch()
+    col_name, canonical_value = found
     return {
         "source": schema.source_id,
         "metrics": [metric_id],
-        "filters": [{"op": "eq", "column": target_col, "value": value}],
+        "filters": [{"op": "neq", "column": col_name, "value": canonical_value}],
+    }
+
+
+@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+for\s+(.+)$")
+def metric_filtered_by_value(m: re.Match, schema: AllowedSchema) -> dict:
+    """<metric> for <value> -- eq filter on a column whose example_values
+    contain <value>. Without populated example_values this pattern is inert
+    by design (no inference, no fabrication)."""
+    metric_id = _resolve_metric(m.group(1), schema)
+    if not metric_id:
+        raise NoMatch()
+    found = _find_column_by_example_value(m.group(2).strip(), schema)
+    if found is None:
+        raise NoMatch()
+    col_name, canonical_value = found
+    return {
+        "source": schema.source_id,
+        "metrics": [metric_id],
+        "filters": [{"op": "eq", "column": col_name, "value": canonical_value}],
     }
 
 
