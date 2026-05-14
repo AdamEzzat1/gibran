@@ -36,7 +36,7 @@ recorded for each attempt.
 
 | Capability | How |
 |---|---|
-| Declare metrics declaratively | `metrics:` block in `gibran.yaml`; **17 primitives** (`count` / `sum` / `avg` / `min` / `max` / `ratio` / `expression` / `percentile` / `rolling_window` / `period_over_period` / `cohort_retention` / `funnel` / `multi_stage_filter` / `weighted_avg` / `stddev_samp` / `stddev_pop` / `count_distinct` / `count_distinct_approx` / `mode`). |
+| Declare metrics declaratively | `metrics:` block in `gibran.yaml`; **19 primitives** (`count` / `sum` / `avg` / `min` / `max` / `ratio` / `expression` / `percentile` / `rolling_window` / `period_over_period` / `cohort_retention` / `funnel` / `multi_stage_filter` / `weighted_avg` / `stddev_samp` / `stddev_pop` / `count_distinct` / `count_distinct_approx` / `mode`). |
 | **Ask in plain English (NEW)** | `gibran ask "show me revenue by region"`. Pattern-template NL layer; **no LLM, no hallucination** — slot resolution requires real metric/dim names on the role's AllowedSchema. Returns "I don't know how to answer that" rather than invent. |
 | **Cohort retention + funnels** | Declare `type: cohort_retention` or `type: funnel`; the engine emits multi-CTE queries (cohort assignment → period join → aggregate; or one CTE per funnel step with `LAG()` conversion ratios). |
 | **Multi-stage filtering** | `type: multi_stage_filter` — "of the top decile by 90-day spend, what's their churn rate?" as a single declarative metric. |

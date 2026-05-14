@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "gibran"
 version = "0.0.2"
-description = "Gibran: governed metric layer + non-LLM NL-to-SQL over DuckDB. 17 metric primitives (incl. cohort_retention, funnel, multi_stage_filter); identity-aware row + column governance; audit-log redaction; pattern-template NL with structural no-hallucination guarantee."
+description = "Gibran: governed metric layer + non-LLM NL-to-SQL over DuckDB. 19 metric primitives (incl. cohort_retention, funnel, multi_stage_filter); identity-aware row + column governance; audit-log redaction; pattern-template NL with structural no-hallucination guarantee."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
