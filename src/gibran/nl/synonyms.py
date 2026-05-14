@@ -43,6 +43,14 @@ GRAIN_WORDS: dict[str, str] = {
 }
 
 
+# "Over time" phrasings.
+# Used by metric_over_time -- when the user says "<metric> trend" or
+# "<metric> over time", route to a temporal grouping with the default
+# monthly grain. The set is intentionally small: only phrasings that
+# unambiguously mean "show this across time."
+OVER_TIME_WORDS: tuple[str, ...] = ("trend", "over time", "across time")
+
+
 # Month-name lookup -- full English names plus standard 3-letter
 # abbreviations (and "sept" since it shows up in real text). Used by
 # metric_in_period to resolve a month word to its 1-12 integer.

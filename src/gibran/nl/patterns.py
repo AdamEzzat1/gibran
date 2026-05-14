@@ -36,6 +36,7 @@ from gibran.nl.synonyms import (
     BOTTOM_WORDS,
     GRAIN_WORDS,
     MONTH_NAMES,
+    OVER_TIME_WORDS,
     TOP_WORDS,
 )
 
@@ -56,6 +57,7 @@ class MatchResult:
 _TOP_ALT = "|".join(TOP_WORDS)
 _BOTTOM_ALT = "|".join(BOTTOM_WORDS)
 _GRAIN_ALT = "|".join(GRAIN_WORDS)
+_OVER_TIME_ALT = "|".join(OVER_TIME_WORDS)
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +220,25 @@ def metric_by_grain(m: re.Match, schema: AllowedSchema) -> dict:
         "source": schema.source_id,
         "metrics": [metric_id],
         "dimensions": [{"id": dim_id, "grain": grain}],
+    }
+
+
+@register(rf"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+(?:{_OVER_TIME_ALT})$")
+def metric_over_time(m: re.Match, schema: AllowedSchema) -> dict:
+    """<metric> trend | <metric> over time -- temporal grouping at month grain.
+
+    Sugar for "<metric> by month" using the informal phrasing. The grain
+    default is `month` rather than auto-detecting because most "trend"
+    questions are about month-scale shape; a user asking specifically for
+    daily or yearly granularity would phrase it as "by day" / "by year"."""
+    metric_id = _resolve_metric(m.group(1), schema)
+    dim_id = _resolve_temporal_dim(schema)
+    if not metric_id or not dim_id:
+        raise NoMatch()
+    return {
+        "source": schema.source_id,
+        "metrics": [metric_id],
+        "dimensions": [{"id": dim_id, "grain": "month"}],
     }
 
 

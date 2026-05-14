@@ -130,6 +130,40 @@ class TestMetricByGrain:
 
 
 # ---------------------------------------------------------------------------
+# Pattern: metric_over_time
+# ---------------------------------------------------------------------------
+
+class TestMetricOverTime:
+    def test_trend(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue trend", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["gross_revenue"]
+        # Always month grain regardless of phrasing -- see pattern docstring.
+        assert m.intent["dimensions"] == [
+            {"id": "orders.order_date", "grain": "month"}
+        ]
+
+    def test_over_time(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue over time", schema)
+        assert m is not None
+        assert m.intent["dimensions"][0]["grain"] == "month"
+
+    def test_across_time(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue across time", schema)
+        assert m is not None
+        assert m.intent["dimensions"][0]["grain"] == "month"
+
+    def test_show_me_prefix(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("show me gross revenue trend", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["gross_revenue"]
+
+
+# ---------------------------------------------------------------------------
 # Pattern: top_n_by_metric
 # ---------------------------------------------------------------------------
 
