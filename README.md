@@ -36,18 +36,27 @@ recorded for each attempt.
 
 | Capability | How |
 |---|---|
-| Declare metrics declaratively | `metrics:` block in `gibran.yaml`; 10 primitives (`count` / `sum` / `avg` / `min` / `max` / `ratio` / `expression` / `percentile` / `rolling_window` / `period_over_period`). |
+| Declare metrics declaratively | `metrics:` block in `gibran.yaml`; **17 primitives** (`count` / `sum` / `avg` / `min` / `max` / `ratio` / `expression` / `percentile` / `rolling_window` / `period_over_period` / `cohort_retention` / `funnel` / `multi_stage_filter` / `weighted_avg` / `stddev_samp` / `stddev_pop` / `count_distinct` / `count_distinct_approx` / `mode`). |
+| **Ask in plain English (NEW)** | `gibran ask "show me revenue by region"`. Pattern-template NL layer; **no LLM, no hallucination** — slot resolution requires real metric/dim names on the role's AllowedSchema. Returns "I don't know how to answer that" rather than invent. |
+| **Cohort retention + funnels** | Declare `type: cohort_retention` or `type: funnel`; the engine emits multi-CTE queries (cohort assignment → period join → aggregate; or one CTE per funnel step with `LAG()` conversion ratios). |
+| **Multi-stage filtering** | `type: multi_stage_filter` — "of the top decile by 90-day spend, what's their churn rate?" as a single declarative metric. |
 | Compose metrics | `ratio` references two metrics; `expression` templates with `{metric_id}`; cycle detection at sync time via a dependency DAG. |
-| Govern access by role | YAML-declared policies with row-filter ASTs (operator whitelist) and column allow/deny. |
-| Hide PII | `sensitivity: pii` / `restricted` on columns; default-deny per-policy; explicit grants required. |
-| Bound access in time | `valid_until` on policies for contractors / consultants / temporary credentials. Evaluation denies past the timestamp without re-sync. |
-| Audit every query | `gibran_query_log` table; for each allow/deny/error, the rewritten SQL + structured deny reason are recorded. Literals adjacent to sensitive columns are redacted before persistence. |
-| Detect data-quality issues | `quality_rules` (`not_null` / `unique` / `range` / `custom_sql`) + `freshness_rules`. A failing `severity: block` rule denies subsequent queries until the data is healthy. |
-| Read from anywhere DuckDB can | Parquet, CSV, DuckDB table, or SQL view — a source-type dispatcher resolves the FROM clause. No manual `CREATE VIEW` needed for file-backed sources. |
-| Introspect what's available | `gibran describe <source>`, `gibran catalog`, `gibran explain --dsl '...'` (parse + validate + compile without executing). |
+| Govern access by role | YAML-declared policies with row-filter ASTs (operator whitelist) + column allow/deny + identity-aware compilation. |
+| **Time-bound + break-glass + rate-limited** | `valid_until` for contractor grants; `is_break_glass: true` for elevated-access roles (mirrored onto every audit row); optional per-process token-bucket rate limiter. |
+| **Hide PII, with audit-log redaction** | `sensitivity: pii` / `restricted`; literal values are redacted in `gibran_query_log.generated_sql` AND `nl_prompt` before persistence. The audit log itself cannot become a side channel. |
+| Audit every query | `gibran_query_log` records every allow/deny/error attempt with rewritten SQL, deny reason, identity, duration, break-glass flag. |
+| **Detect data-quality issues — incl. anomalies** | 5 rule types (`not_null` / `unique` / `range` / `custom_sql` / **`anomaly`** — N-sigma vs trailing window) + freshness rules. Block-severity failures fire `alert_webhook`. |
+| **Access-pattern anomaly detection** | `gibran detect-access-anomalies` flags users whose query volume today is > N sigma above their trailing baseline. |
+| **Approval workflow** | High-sensitivity changes can be queued for out-of-band review (`gibran approve <id> --by <name>`). |
+| **Schema-drift detection** | `gibran sync` probes each source's actual schema; warns on `missing_in_db` / `missing_in_yaml` / `type_mismatch`. |
+| **In-process scheduler** | `gibran check --watch --interval N` for local-dev / small-deployment scheduling. |
+| Read from anywhere DuckDB can | Parquet, CSV, DuckDB table, or SQL view — a source-type dispatcher resolves the FROM clause. |
+| **Plan + result caching** | Catalog-generation token invalidates on `gibran sync`; source-health generation invalidates on `gibran check`. Audit-log row still written on cache hits. |
+| **Materialized metrics** | `materialized: [dim_id, ...]` on a metric → `gibran sync` creates a pre-aggregated table; compile routes matching intents. |
+| Introspect what's available | `gibran describe <source>`, `gibran catalog`, `gibran explain --dsl '...'`. |
 | Export results | `gibran query --output csv|json|parquet [path]`. |
 
-## What's proven (334 tests)
+## What's proven (456 tests)
 
 Every test runs in-process against an in-memory DuckDB; the whole suite
 completes in under a minute.
@@ -56,19 +65,27 @@ completes in under a minute.
 |---|---:|---|
 | `test_dsl.py` | 54 | DSL Pydantic validation, semantic validation against AllowedSchema, compiler SQL emission shape for every primitive, end-to-end execution. |
 | `test_sync.py` | 34 | YAML loader/applier round-trip, idempotency, cross-entity validation, dependency-DAG cycle rejection, `valid_until` round-trip + resync stability. |
-| `test_redaction.py` | 31 | Pure-function SQL + JSON redactors (eq / in / between / like / nested and-or-not / public columns unaffected / unparseable input fail-open) and end-to-end audit-row inspection. |
+| `test_redaction.py` | 31 | Pure-function SQL + JSON redactors and end-to-end audit-row inspection (both `generated_sql` and `nl_prompt` redacted). |
 | `test_governance.py` | 29 | `preview_schema` + `evaluate` across every `DenyReason`, role-attribute substitution, observability-aware denial ordering, time-bound expiry. |
-| `test_execution_sql.py` | 25 | Parse → govern → rewrite → execute pipeline; unsupported-feature rejection (joins, subqueries, CTEs, SELECT *). |
+| `test_execution_sql.py` | 25 | Parse → govern → rewrite → execute pipeline; unsupported-feature rejection (subqueries, SELECT *). |
 | `test_ast_validation.py` | 20 | Filter-AST operator whitelist; rejects `like`, `regex`, function calls, attribute refs in DSL context. |
 | `test_ast_compile.py` | 20 | Policy + intent AST → SQL emission; identity-attribute substitution; literal rendering. |
 | `test_observability_runner.py` | 20 | Quality + freshness rule evaluation; severity routing; staleness windows. |
+| `test_shape_primitives.py` | 20 | cohort_retention + funnel: Pydantic validation, applier persistence, compiler 3-CTE shape, end-to-end retention + funnel execution, governance walks CTE bodies. |
 | `test_jwt_resolver.py` | 18 | RS256/HS256, expiry, audience, issuer, tampered-signature rejection. |
+| `test_nl_patterns.py` | 18 | 6 NL patterns (top_n, by_grain, by_dim, count_of, filtered_by_value, single_metric) + Tier-5 no-invention safety + end-to-end run_nl_query. |
+| `test_tier4_governance.py` | 17 | multi_stage_filter; anomaly rule; break-glass audit flag; webhook alerting; rate limiter; access-pattern anomaly; approval workflow; query timeout. |
 | `test_period_over_period.py` | 17 | All three comparisons (`delta`/`ratio`/`pct_change`); validates against hand-computed expected output. |
 | `test_cli_introspection.py` | 16 | `describe`, `catalog`, `explain` output shapes. |
 | `test_observability.py` | 15 | Source-health cache reads; `record_run` semantics. |
-| `test_migrations.py` | 10 | All 7 migrations apply clean + idempotent; pinned schema invariants. |
+| `test_drift.py` | 15 | Schema-drift detection: `missing_in_db` / `missing_in_yaml` / `type_mismatch` + unreachable-source handling + CLI integration. |
+| `test_cte_infra.py` | 15 | CompiledQuery/CTE dataclasses; CTE-aware parser; column walk through CTE bodies; multi-source-via-CTE rejection. |
+| `test_aggregate_primitives.py` | 15 | weighted_avg / stddev_samp / stddev_pop / count_distinct / count_distinct_approx / mode: validation + applier + end-to-end. |
+| `test_perf_caches.py` | 12 | PlanCache / ResultCache hit-miss-eviction + catalog/health generation invalidation + materialized-metric routing. |
+| `test_migrations.py` | 11 | All 9 migrations apply clean + idempotent; pinned schema invariants per migration. |
 | `test_source_dispatch.py` | 9 | Parquet / CSV / DuckDB table / SQL view dispatcher; FROM-clause shape per type. |
 | `test_ast_intent.py` | 8 | Intent-AST trust boundary — rejects `{"$attr":...}` substitution in DSL context. |
+| `test_example_values.py` | 7 | Low-cardinality sampling + sensitivity gate + opt-out + CLI integration. |
 | `test_init_sample.py` | 5 | `gibran init --sample` round-trip with a synthetic project. |
 | `test_imports.py` | 3 | All modules importable; no circular imports. |
 
@@ -480,6 +497,94 @@ injects `WHERE region='west'`, groups by month, and runs. The
 ("gross_revenue", 1), ("order_count", 1)]` for reproducibility — you
 know exactly which metric definitions answered this question.
 
+## Ask in plain English (NL layer, no LLM)
+
+`gibran ask "<question>"` routes natural-language questions through a
+fixed pattern matcher (6 templates) that resolves every metric /
+dimension / column name against the role's `AllowedSchema`. **No LLM,
+no hallucination** — if a slot can't resolve to a real reference, the
+matcher returns "I don't know how to answer that" rather than invent.
+
+### One-line questions, non-trivial SQL
+
+```bash
+# 1. Cohort retention from a single phrase
+$ gibran ask "show me customer retention" --source orders --role admin
+# -> matches single_metric, resolves to `customer_retention` (cohort_retention type)
+# -> emits a 3-CTE query:
+#    WITH cohorts AS (...),
+#         retention AS (...),
+#         cohort_sizes AS (...)
+#    SELECT cohort_start, periods_since_cohort, retained_count,
+#           cohort_size, retention_rate
+#    FROM retention r JOIN cohort_sizes sc ON r.cohort_start = sc.cohort_start
+#    GROUP BY ... ORDER BY ...
+
+# 2. Funnel conversion
+$ gibran ask "show me paid funnel" --source orders --role admin
+# -> matches single_metric, resolves to `paid_funnel` (funnel type)
+# -> emits one CTE per step + step_counts aggregator + LAG/FIRST_VALUE
+#    conversion ratios
+
+# 3. Month-over-month delta
+$ gibran ask "show me revenue mom" --source orders --role admin
+# -> matches single_metric, resolves to `revenue_mom` (period_over_period)
+# -> emits LAG window function over DATE_TRUNC('month', order_date)
+
+# 4. Time-grained aggregation
+$ gibran ask "gross revenue by month" --source orders --role admin
+# -> matches metric_by_grain
+# -> emits DATE_TRUNC('month', order_date) + GROUP BY 1
+
+# 5. Top-N with ordering
+$ gibran ask "top 5 region by gross revenue" --source orders --role admin
+# -> matches top_n_by_metric
+# -> emits ORDER BY gross_revenue DESC LIMIT 5
+
+# 6. Filter inferred from sampled example values
+$ gibran ask "gross revenue for west" --source orders --role admin
+# -> matches metric_filtered_by_value; "west" found in region.example_values
+# -> emits WHERE region = 'west'
+```
+
+### Same question, two roles, two results — governance applies after NL
+
+```bash
+# analyst_west's policy auto-injects WHERE region = 'west'
+$ gibran ask "show me gross revenue by region" --role analyst_west --attr region=west --source orders
+# -> Returns one row (west only). Same NL input, same DSL intent, but
+#    different injected WHERE clause depending on the role's policy.
+```
+
+### The "I don't know" case (the contract you can't get from LLMs)
+
+```bash
+$ gibran ask "why did revenue drop last week" --source orders --role admin
+I don't know how to answer that.
+(The NL layer matches a fixed set of patterns; rephrase or use
+ `gibran query --dsl` directly.)
+# (exit code 4)
+```
+
+This is a *good* failure. An LLM-based layer would happily produce
+something — possibly correct, possibly subtly wrong. The pattern
+matcher reports honestly when it doesn't recognize a shape, and
+cannot fabricate a metric that doesn't exist.
+
+### What patterns are wired
+
+| Pattern | Example input | Routes to |
+|---|---|---|
+| `top_n_by_metric` | "top 5 region by gross revenue" | DSL with ORDER BY + LIMIT |
+| `metric_by_grain` | "revenue by month" / "by quarter" / "by year" | DSL with grain on temporal dim |
+| `metric_by_dim` | "revenue by region" | DSL with one dimension |
+| `count_of_thing` | "count of orders" / "how many" / "total" | First `count` metric on the source |
+| `metric_filtered_by_value` | "revenue for west" | Equality filter on the column whose `example_values` contains the literal |
+| `single_metric` | "show me revenue" / "what's the p95 amount" | Bare metric selection |
+
+Adding patterns is mechanical (decorator + builder). The architecture
+supports ~30 cleanly per HANDOFF estimate.
+
 ## CLI reference
 
 | Command | What it does |
@@ -492,22 +597,28 @@ know exactly which metric definitions answered this question.
 | `gibran describe <source> --role <r>` | Show AllowedSchema (columns / dimensions / metrics / row filter) for an identity. |
 | `gibran catalog --role <r>` | List sources the identity can see, with column/dim/metric counts. |
 | `gibran register` | Generate a sample JWT for local dev. |
+| **`gibran ask "<question>" --source <s> --role <r>`** | Natural-language NL layer (no LLM). Pattern-template matching with slot resolution against AllowedSchema. Exit code 4 when no pattern matches — distinct from 2=denied, 3=error so scripts can branch on "didn't understand". |
+| **`gibran approve <change_id> --by <name>`** | Apply a pending change from the approval queue. |
+| **`gibran detect-access-anomalies`** | Scan `gibran_query_log` for users whose query volume today is > N sigma above their trailing baseline. |
+| **`gibran check --watch --interval N`** | In-process scheduler: loops on N-second intervals. Local-dev / small-deployment shape only — production should use cron / systemd / k8s CronJob. |
 
 ## Project layout
 
 ```
 src/gibran/
   catalog/            # docstrings — schema is in migrations/
-  governance/         # identity, policies, ast, evaluate, redaction
-  observability/      # quality/freshness types + runner
-  dsl/                # QueryIntent, validate, compile, run
-  execution/          # parse → govern → rewrite → execute
-  sync/               # YAML schema, loader, applier, migration runner
-  cli/                # typer entrypoint
+  governance/         # identity, policies, ast, evaluate, redaction, rate_limit
+  observability/      # quality/freshness types + runner + access_anomaly
+  dsl/                # QueryIntent, validate, compile, run, plan_cache
+  execution/          # parse → govern → rewrite → execute, result_cache
+  sync/               # YAML schema, loader, applier, migrations, drift,
+                      # example_values, approval
+  cli/                # typer entrypoint (incl. `gibran ask`)
+  nl/                 # pattern-template NL layer (no LLM)
   _sql.py             # qident, render_literal
   _source_dispatch.py # source_type -> FROM-clause snippet
-migrations/           # 0001 catalog -> 0008 example_values
-tests/                # 409 tests across 21 files (+ benchmarks/)
+migrations/           # 0001 catalog -> 0009 tier4_governance
+tests/                # 456 tests across 23 files (+ benchmarks/)
 prompts/
   architect_layer.md  # refined architect prompt with fixed constraints
 HANDOFF.md            # forward-looking priority list
@@ -524,13 +635,15 @@ python -m pytest tests
 
 - **LLM in any emission path.** Any approach where the system can
   invent a metric or column name not in `AllowedSchema` is out.
-  Pattern templates and local-embedding retrieval are in-scope for a
-  future NL layer; constrained-LLM emission is not.
+  Pattern templates (shipped) and local-embedding retrieval (planned)
+  are in-scope for the NL layer; constrained-LLM emission is not.
 - **Cross-source metrics.** Composition is single-source in V1; the
   dependency DAG is structured so V2 can relax this without a migration.
 - **Multi-process / server mode.** DuckDB is single-writer per file.
-- **Cohort + funnel + multi-stage CTE primitives.** Tier 3 work; needs
-  the compiler to emit `WITH a AS (...), b AS (...) SELECT ...` shape.
+  Rate limiter is per-process accordingly; cross-process needs
+  Redis-or-equivalent.
+- **Multi-tenancy** — V2 architectural pass; `tenant_id` would need to
+  propagate through every governance table.
 
 See `HANDOFF.md` for the full prioritized roadmap.
 

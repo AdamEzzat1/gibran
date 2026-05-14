@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gibran"
-version = "0.0.1"
-description = "Gibran: governed analytics + metric layer over DuckDB. YAML-defined sources/metrics/policies; queries flow through an identity-aware governance layer that rewrites and audits every attempt."
+version = "0.0.2"
+description = "Gibran: governed metric layer + non-LLM NL-to-SQL over DuckDB. 17 metric primitives (incl. cohort_retention, funnel, multi_stage_filter); identity-aware row + column governance; audit-log redaction; pattern-template NL with structural no-hallucination guarantee."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -21,7 +21,7 @@ keywords = [
     "audit",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "License :: OSI Approved :: MIT License",
