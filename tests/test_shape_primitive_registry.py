@@ -26,8 +26,9 @@ class TestRegistryShape:
         # must update this assertion.
         assert set(SHAPE_PRIMITIVES.keys()) == {
             "cohort_retention", "funnel", "multi_stage_filter",
-            # Phase 3 addition: filter entities by sub-query intersection.
-            "cohort_filter",
+            # Phase 3 additions:
+            "cohort_filter",   # filter entities by sub-query intersection
+            "anomaly_query",   # query gibran_quality_runs by rule_id
         }
         # Each entry is an INSTANCE (the decorator instantiates), not
         # a class -- so callers can invoke .build / .validate_intent

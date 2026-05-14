@@ -461,6 +461,56 @@ class TestMetricWhere:
 
 
 # ---------------------------------------------------------------------------
+# Pattern: metric_as_percent_of (routes to ratio metric by num/denom)
+# ---------------------------------------------------------------------------
+
+class TestMetricAsPercentOf:
+    def test_routes_to_ratio_by_components(self) -> None:
+        # avg_order_value is type=ratio with numerator=gross_revenue,
+        # denominator=order_count. So "gross revenue as percent of
+        # order count" routes here.
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "gross revenue as percent of order count", schema,
+        )
+        assert m is not None
+        assert m.intent["metrics"] == ["avg_order_value"]
+
+    def test_percent_sign_synonym(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "gross revenue as % of order count", schema,
+        )
+        assert m is not None
+        assert m.intent["metrics"] == ["avg_order_value"]
+
+    def test_wrong_direction_returns_none(self) -> None:
+        # "order count as percent of gross revenue" would mean
+        # order_count / gross_revenue, but avg_order_value is the
+        # OPPOSITE direction. No ratio metric matches, so NoMatch.
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "order count as percent of gross revenue", schema,
+        )
+        assert m is None
+
+    def test_unknown_components_return_none(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "bogus as percent of gross revenue", schema,
+        )
+        assert m is None
+
+    def test_show_me_prefix(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "show me gross revenue as percent of order count", schema,
+        )
+        assert m is not None
+        assert m.intent["metrics"] == ["avg_order_value"]
+
+
+# ---------------------------------------------------------------------------
 # Pattern: metric_filter_compound (two AND-ed eq filters)
 # ---------------------------------------------------------------------------
 
@@ -907,6 +957,44 @@ class TestMetricFilteredByValue:
         # Falls through to single_metric; "gross revenue for mars" treated
         # as a single phrase -> no metric match; result is None.
         assert m is None
+
+
+# ---------------------------------------------------------------------------
+# Pattern: metric_anomalies (routes to an anomaly_query metric)
+# ---------------------------------------------------------------------------
+
+class TestMetricAnomalies:
+    def test_anomalies_in_revenue_routes_to_anomaly_query(self) -> None:
+        # The fixture has revenue_anomalies (anomaly_query metric).
+        schema = _schema(_populated_db())
+        m = nl_to_intent("anomalies in revenue", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["revenue_anomalies"]
+
+    def test_singular_anomaly_accepted(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("anomaly in revenue", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["revenue_anomalies"]
+
+    def test_display_name_match(self) -> None:
+        # "Revenue Anomalies" is the display name.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("anomalies in Revenue Anomalies", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["revenue_anomalies"]
+
+    def test_no_matching_anomaly_metric_returns_none(self) -> None:
+        # "amount" -- no anomaly_query metric whose name contains amount.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("anomalies in amount", schema)
+        assert m is None
+
+    def test_show_me_prefix(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("show me anomalies in revenue", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["revenue_anomalies"]
 
 
 # ---------------------------------------------------------------------------

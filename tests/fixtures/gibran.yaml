@@ -181,6 +181,12 @@ metrics:
     cohort_condition: "order_date >= '2026-01-01' AND order_date < '2026-02-01' AND status = 'paid'"
     result_condition: "order_date >= '2026-02-01' AND order_date < '2026-03-01' AND status = 'paid'"
     description: Customers who placed a paid order in January AND returned with another paid order in February.
+  - id: revenue_anomalies
+    source: orders
+    display_name: Revenue Anomalies
+    type: anomaly_query
+    rule_id: orders_revenue_anomaly
+    description: Detected anomalies in the revenue anomaly rule's observations.
 
 roles:
   - id: analyst_west
@@ -228,6 +234,14 @@ quality_rules:
       column: amount
       min: 0
       max: 1000000
+    severity: warn
+  - id: orders_revenue_anomaly
+    source: orders
+    type: anomaly
+    config:
+      sql: "SELECT SUM(amount) FROM orders WHERE status = 'paid'"
+      n_sigma: 2.0
+      trailing_periods: 7
     severity: warn
 
 freshness_rules:

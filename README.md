@@ -56,7 +56,7 @@ recorded for each attempt.
 | Introspect what's available | `gibran describe <source>`, `gibran catalog`, `gibran explain --dsl '...'`. |
 | Export results | `gibran query --output csv|json|parquet [path]`. |
 
-## What's proven (586 tests)
+## What's proven (603 tests)
 
 Every test runs in-process against an in-memory DuckDB; the whole suite
 completes in under a minute.
@@ -573,7 +573,7 @@ cannot fabricate a metric that doesn't exist.
 
 ### What patterns are wired
 
-24 patterns total. Grouped by what they unlock:
+26 patterns total. Grouped by what they unlock:
 
 **Ranking & projection**
 
@@ -598,6 +598,8 @@ cannot fabricate a metric that doesn't exist.
 | | "median amount" | `median` metric |
 | | "first \| last order amount" | `first_value` / `last_value` metric |
 | `metric_period_over_period` | "revenue yoy" / "revenue vs last year" / "revenue mom" / "revenue vs last quarter" | Existing `period_over_period` metric for the requested unit |
+| `metric_as_percent_of` | "gross revenue as percent of order count" / "X as % of Y" | Existing `ratio` metric whose numerator matches X and denominator matches Y |
+| `metric_anomalies` | "anomalies in revenue" / "anomaly in revenue" | Existing `anomaly_query` metric |
 | `metric_distribution` | "p95_amount distribution" | Existing `median` or `percentile` metric |
 
 **Time**
@@ -628,11 +630,12 @@ always validates against `AllowedSchema` — unknown metrics / dims /
 filter values fall through, never get fabricated. The architecture
 supports ~30 cleanly per the architecture estimate.
 
-### Cohort_filter primitive (Phase 3)
+### Shape primitives (Phase 3)
 
-`cohort_filter` is a shape primitive that counts entities matching
-BOTH a cohort-condition and a result-condition sub-query. Declared
-in YAML:
+Two shape primitives that don't fit a simple SELECT shape:
+
+**`cohort_filter`** counts entities matching BOTH a cohort-condition and a
+result-condition sub-query (2-CTE + JOIN):
 
 ```yaml
 - id: jan_to_feb_returners
@@ -643,21 +646,33 @@ in YAML:
   result_condition: "order_date >= '2026-02-01' AND order_date < '2026-03-01' AND status = 'paid'"
 ```
 
-Emits a 2-CTE + JOIN query (cohort × result intersection). NL routes
-via `single_metric` ("show me jan_to_feb_returners") -- a richer
-"customers who ordered ... and returned ..." parser requires the
-Phase 3 entity recognizer.
+NL routes via `single_metric` ("show me jan_to_feb_returners"); a richer
+"customers who ordered ... and returned ..." parser requires the Phase 3
+entity recognizer.
+
+**`anomaly_query`** queries `gibran_quality_runs` for the failed runs of a
+named anomaly rule:
+
+```yaml
+- id: revenue_anomalies
+  source: orders
+  type: anomaly_query
+  rule_id: orders_revenue_anomaly  # references a rule_type='anomaly' quality_rule
+```
+
+Output rows: `(run_id, observed_value, ran_at, detected_anomaly)`. NL
+routes via `metric_anomalies` ("anomalies in revenue"). The compiled SQL
+reads from `gibran_quality_runs` rather than the metric's declared source
+— the DSL runner sets `bypasses_governance=True` on the compile result so
+the SQL-level source check is skipped (the DSL-level metric access check
+via `preview_schema` already gated the operation).
 
 ### Not yet covered
 
-These question shapes need machinery beyond what currently exists:
-
 | Question shape | Why deferred |
 |---|---|
-| "anomalies in revenue" | Needs an anomaly-as-query design decision. Today anomalies are background rules writing to `gibran_quality_runs`. A queryable surface could be either a CLI command (like `gibran detect-access-anomalies`) or a new metric type that emits SELECT from `gibran_quality_runs`. Both are reasonable — neither is roadmapped. |
-| "X as percent of Y" / "X as % of Y" | Needs either MetricView to expose `numerator`/`denominator` (so the pattern can route to the right `ratio` metric) or the Phase 3 entity recognizer (which can identify the two metric phrases and synthesize a comparison primitive call). |
-| "customers who ordered last month and returned" | The `cohort_filter` primitive (above) handles the SQL shape, but NL phrasing requires entity recognition (parse "customers", "ordered last month", "returned"). Phase 3 task 3.1. |
-| "what changed about X" / arbitrary paraphrasing | Embedding retrieval (Tier 5 Item 20) -- only after pattern templates hit the ceiling and user feedback says the "I don't know" rate is unacceptable. |
+| "customers who ordered last month and returned" | The `cohort_filter` primitive handles the SQL shape, but NL phrasing requires the Phase 3 entity recognizer. |
+| "what changed about X" / arbitrary paraphrasing | Embedding retrieval (Tier 5 Item 20) — only after pattern templates hit the ceiling and user feedback says the "I don't know" rate is unacceptable. |
 
 ## CLI reference
 
@@ -694,7 +709,7 @@ src/gibran/
   _sql.py             # qident, render_literal
   _source_dispatch.py # source_type -> FROM-clause snippet
 migrations/           # 0001 catalog -> 0009 tier4_governance
-tests/                # 586 tests across 27 files (+ benchmarks/)
+tests/                # 603 tests across 27 files (+ benchmarks/)
 prompts/
   architect_layer.md  # refined architect prompt with fixed constraints
 STATUS.md             # current per-layer state

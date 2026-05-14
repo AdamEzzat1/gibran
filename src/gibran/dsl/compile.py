@@ -73,9 +73,19 @@ class CompiledQuery:
 
     Use `.render()` to assemble the final `WITH ... SELECT ...` string
     suitable for handing to the execution layer.
+
+    `bypasses_governance`: set by shape primitives that read from
+    gibran-internal tables (e.g. anomaly_query reads gibran_quality_runs).
+    For those, the SQL FROM clause references a table the user has no
+    user-source policy for -- but the DSL-level metric access check
+    already gated this (the user can see the metric in their AllowedSchema
+    iff the metric's declared source allows them). The SQL-level
+    governance check is skipped in run_sql_query when this flag is set.
+    Default False; setting it on any non-internal primitive is a bug.
     """
     ctes: tuple[CTE, ...]
     main_sql: str
+    bypasses_governance: bool = False
 
     def render(self) -> str:
         """Assemble `WITH cte1 AS (...), cte2 AS (...) <main_sql>`.
@@ -899,6 +909,53 @@ def _build_cohort_filter(
 
 
 # ---------------------------------------------------------------------------
+# anomaly_query
+# ---------------------------------------------------------------------------
+
+def _build_anomaly_query(
+    meta: _MetricMeta, from_relation: str, intent: QueryIntent
+) -> CompiledQuery:
+    """Emit a SELECT against gibran_quality_runs for detected anomalies.
+
+    Output rows: (run_id, observed_value, ran_at, detected_anomaly).
+    Filtered to failed runs (passed = FALSE) of the metric's rule_id;
+    ordered most-recent-first; bounded by intent.limit.
+
+    Note: ignores `from_relation` -- the query reads from the system
+    table gibran_quality_runs, not the user source. The metric is still
+    *attached to* its declared source for governance purposes (only
+    identities with access to the source can see the metric in
+    AllowedSchema), which is the right trust model: the source owner
+    decides which of their anomaly rules are user-visible.
+    """
+    cfg = meta.metric_config
+    if not cfg:
+        raise CompileError(
+            f"anomaly_query metric {meta.metric_id!r} is missing metric_config "
+            f"(was the sync re-run after the primitive was added?)"
+        )
+    rule_id = cfg["rule_id"]
+    # SQL-quote the rule_id for safe inclusion; rule_id is operator-authored
+    # (gibran.yaml) so injection isn't a user-input attack vector, but
+    # render_literal handles edge cases (apostrophes, etc.).
+    main_sql = (
+        f"SELECT\n"
+        f"  run_id,\n"
+        f"  CAST(observed_value AS VARCHAR) AS observed_value,\n"
+        f"  ran_at,\n"
+        f"  NOT passed AS detected_anomaly\n"
+        f"FROM gibran_quality_runs\n"
+        f"WHERE rule_id = {render_literal(rule_id)}\n"
+        f"  AND passed = FALSE\n"
+        f"ORDER BY ran_at DESC\n"
+        f"LIMIT {intent.limit}"
+    )
+    return CompiledQuery(
+        ctes=(), main_sql=main_sql, bypasses_governance=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Shape-primitive registry classes
 # ---------------------------------------------------------------------------
 #
@@ -951,3 +1008,13 @@ class CohortFilter(ShapePrimitive):
         self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
     ) -> CompiledQuery:
         return _build_cohort_filter(meta, from_clause, intent)
+
+
+@register_shape_primitive
+class AnomalyQuery(ShapePrimitive):
+    metric_type = "anomaly_query"
+
+    def build(
+        self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
+    ) -> CompiledQuery:
+        return _build_anomaly_query(meta, from_clause, intent)

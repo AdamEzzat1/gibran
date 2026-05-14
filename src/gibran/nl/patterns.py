@@ -682,6 +682,48 @@ def metric_excluding_value(m: re.Match, schema: AllowedSchema) -> dict:
     }
 
 
+@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+as\s+(?:percent|%)\s+of\s+(.+)$")
+def metric_as_percent_of(m: re.Match, schema: AllowedSchema) -> dict:
+    """<m1> as percent of <m2> -- route to an existing ratio metric whose
+    numerator matches <m1> and denominator matches <m2>.
+
+    Direction matters: "X as percent of Y" means X/Y, so the matched
+    ratio metric's numerator must contain X and its denominator must
+    contain Y. Asking "order count as percent of gross revenue" would
+    NOT match avg_order_value (which is gross_revenue / order_count --
+    wrong direction).
+
+    Uses the numerator/denominator fields on MetricView (populated by
+    DefaultGovernance from the stored {num}/{denom} ratio expression).
+    For non-ratio metrics, those fields are None and the pattern skips
+    them. If no ratio metric has matching components, NoMatch -- no
+    inline ratio synthesis (the no-fabrication invariant)."""
+    user_num_phrase = m.group(1).lower().strip()
+    user_denom_phrase = m.group(2).lower().strip()
+    # Index metrics by id for fast component lookup.
+    by_id = {met.metric_id: met for met in schema.metrics}
+    candidates: list[tuple[int, str]] = []
+    for met in schema.metrics:
+        if met.metric_type != "ratio":
+            continue
+        if met.numerator is None or met.denominator is None:
+            continue
+        num_view = by_id.get(met.numerator)
+        denom_view = by_id.get(met.denominator)
+        if num_view is None or denom_view is None:
+            continue
+        num_name_lc = (num_view.metric_id + " " + num_view.display_name).lower()
+        denom_name_lc = (denom_view.metric_id + " " + denom_view.display_name).lower()
+        if user_num_phrase in num_name_lc and user_denom_phrase in denom_name_lc:
+            candidates.append((len(met.display_name), met.metric_id))
+    if not candidates:
+        raise NoMatch()
+    return {
+        "source": schema.source_id,
+        "metrics": [sorted(candidates)[0][1]],
+    }
+
+
 @register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+for\s+(\w+)\s+and\s+(\w+)$")
 def metric_filter_compound(m: re.Match, schema: AllowedSchema) -> dict:
     """<metric> for <v1> and <v2> -- two eq filters AND-ed together.
@@ -788,6 +830,35 @@ def metric_filtered_by_value(m: re.Match, schema: AllowedSchema) -> dict:
         "source": schema.source_id,
         "metrics": [metric_id],
         "filters": [{"op": "eq", "column": col_name, "value": canonical_value}],
+    }
+
+
+@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?anomal(?:y|ies)\s+in\s+(.+)$")
+def metric_anomalies(m: re.Match, schema: AllowedSchema) -> dict:
+    """anomalies in <metric> / anomaly in <metric> -- route to an
+    anomaly_query metric whose name matches <metric>.
+
+    Requires a pre-declared anomaly_query metric in the catalog (which
+    in turn references a rule_type='anomaly' quality_rule). If no
+    anomaly_query metric matches the phrase, NoMatch -- the layer
+    doesn't synthesize anomaly detection inline.
+
+    Same shape as metric_distribution / metric_by_type_keyword: filter
+    AllowedSchema.metrics to anomaly_query type, then substring-match
+    the user's noun against the metric's name."""
+    user_phrase = m.group(1).lower().strip()
+    candidates: list[tuple[int, str]] = []
+    for metric in schema.metrics:
+        if metric.metric_type != "anomaly_query":
+            continue
+        name_lc = (metric.metric_id + " " + metric.display_name).lower()
+        if user_phrase in name_lc:
+            candidates.append((len(metric.display_name), metric.metric_id))
+    if not candidates:
+        raise NoMatch()
+    return {
+        "source": schema.source_id,
+        "metrics": [sorted(candidates)[0][1]],
     }
 
 

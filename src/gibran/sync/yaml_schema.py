@@ -56,6 +56,8 @@ MetricType = Literal[
     "variance", "first_value", "last_value", "median",
     # Phase 3 shape primitive: filter entities by sub-query intersection.
     "cohort_filter",
+    # Phase 3 shape primitive: query detected anomalies for a rule_id.
+    "anomaly_query",
 ]
 
 RollingAggregate = Literal["sum", "avg", "min", "max", "count"]
@@ -122,6 +124,7 @@ class MetricConfig(_Strict):
         # references that we'd need to resolve at sync time -- deferrable.
         incompatible = {
             "cohort_retention", "funnel", "multi_stage_filter", "cohort_filter",
+            "anomaly_query",
             "ratio", "expression", "rolling_window", "period_over_period",
         }
         if self.type in incompatible:
@@ -227,6 +230,13 @@ class MetricConfig(_Strict):
     # source's columns -- same trust model as funnel_steps[].condition.
     cohort_condition: str | None = None
     result_condition: str | None = None
+
+    # anomaly_query-specific (Phase 3 shape primitive). Queries
+    # gibran_quality_runs for failed runs of the named rule_id. The
+    # rule_id must reference an existing rule_type='anomaly' rule; the
+    # cross-entity check happens at sync time (loader), not in this
+    # field-local validator.
+    rule_id: str | None = None
 
     @model_validator(mode="after")
     def _check_shape(self) -> "MetricConfig":
@@ -398,6 +408,18 @@ class MetricConfig(_Strict):
             if self.expression or self.numerator or self.denominator:
                 raise ValueError(
                     f"metric {self.id!r}: cohort_filter cannot have "
+                    f"expression/numerator/denominator"
+                )
+        elif self.type == "anomaly_query":
+            if self.rule_id is None:
+                raise ValueError(
+                    f"metric {self.id!r}: anomaly_query requires `rule_id` "
+                    f"(pointing to a rule_type='anomaly' rule in "
+                    f"quality_rules)"
+                )
+            if self.expression or self.numerator or self.denominator:
+                raise ValueError(
+                    f"metric {self.id!r}: anomaly_query cannot have "
                     f"expression/numerator/denominator"
                 )
         elif self.type == "weighted_avg":

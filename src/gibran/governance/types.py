@@ -101,6 +101,14 @@ class MetricView:
     unit: str | None
     description: str | None
     depends_on: tuple[str, ...]
+    # For ratio metrics, the metric_ids of the numerator and
+    # denominator components (parsed from the stored {num}/{denom}
+    # expression at preview-schema time). None for non-ratio metrics.
+    # Exposed so NL patterns like `metric_as_percent_of` can route
+    # directionally ("X as percent of Y" -> X/Y, not Y/X) without
+    # re-parsing the catalog. Phase 3 Option A addition.
+    numerator: str | None = None
+    denominator: str | None = None
 
 
 @dataclass(frozen=True)

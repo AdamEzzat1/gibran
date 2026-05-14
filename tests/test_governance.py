@@ -58,6 +58,8 @@ class TestPreviewSchema:
             "revenue_yoy",
             # Phase 3 cohort_filter primitive addition:
             "jan_to_feb_returners",
+            # Phase 3 anomaly_query primitive addition:
+            "revenue_anomalies",
         }
 
     def test_external_partner_sees_only_granted_columns_default_deny(self) -> None:

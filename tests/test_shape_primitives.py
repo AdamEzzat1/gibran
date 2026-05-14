@@ -493,3 +493,94 @@ class TestCohortFilterEndToEnd:
         )
         with pytest.raises(IntentValidationError, match="cannot be combined with intent.dimensions"):
             validate_intent(intent, gov.preview_schema(ident, "orders"))
+
+
+# ---------------------------------------------------------------------------
+# anomaly_query: Pydantic validation
+# ---------------------------------------------------------------------------
+
+class TestAnomalyQueryValidation:
+    def test_minimum_config_accepted(self) -> None:
+        m = MetricConfig(
+            id="a", source="orders", display_name="A",
+            type="anomaly_query", rule_id="orders_revenue_anomaly",
+        )
+        assert m.type == "anomaly_query"
+
+    def test_missing_rule_id_rejected(self) -> None:
+        with pytest.raises(ValueError, match="anomaly_query requires .rule_id."):
+            MetricConfig(
+                id="a", source="orders", display_name="A", type="anomaly_query",
+            )
+
+    def test_extra_scalar_fields_rejected(self) -> None:
+        with pytest.raises(ValueError, match="cannot have"):
+            MetricConfig(
+                id="a", source="orders", display_name="A", type="anomaly_query",
+                rule_id="orders_revenue_anomaly", expression="amount",
+            )
+
+    def test_anomaly_query_cannot_be_materialized(self) -> None:
+        with pytest.raises(ValueError, match="cannot be materialized"):
+            MetricConfig(
+                id="a", source="orders", display_name="A", type="anomaly_query",
+                rule_id="orders_revenue_anomaly", materialized=[],
+            )
+
+
+# ---------------------------------------------------------------------------
+# anomaly_query: end-to-end query against synthetic gibran_quality_runs rows
+# ---------------------------------------------------------------------------
+
+class TestAnomalyQueryEndToEnd:
+    def test_queries_failed_runs_only(self) -> None:
+        # The fixture defines orders_revenue_anomaly + revenue_anomalies
+        # metric. Insert synthetic runs (1 passing, 2 failing); the query
+        # should return only the 2 failing ones.
+        con = _populated_db()
+        ident, gov = _admin(con)
+        # Synthetic run rows -- 1 pass + 2 fails on the right rule + 1
+        # fail on an unrelated rule (must be excluded).
+        con.execute(
+            "INSERT INTO gibran_quality_runs "
+            "(run_id, rule_id, rule_kind, passed, observed_value, ran_at) VALUES "
+            "('r1', 'orders_revenue_anomaly', 'quality', TRUE, "
+            "  '{\"value\": 100}'::JSON, TIMESTAMP '2026-04-01'), "
+            "('r2', 'orders_revenue_anomaly', 'quality', FALSE, "
+            "  '{\"value\": 999}'::JSON, TIMESTAMP '2026-04-02'), "
+            "('r3', 'orders_revenue_anomaly', 'quality', FALSE, "
+            "  '{\"value\": 50}'::JSON, TIMESTAMP '2026-04-03'), "
+            "('r4', 'unrelated_rule',        'quality', FALSE, "
+            "  '{\"value\": 7}'::JSON, TIMESTAMP '2026-04-04')"
+        )
+        intent = QueryIntent(source="orders", metrics=["revenue_anomalies"])
+        result = run_dsl_query(con, gov, ident, intent.model_dump())
+        qr = result.query_result
+        assert qr is not None and qr.status == "ok"
+        assert qr.columns == (
+            "run_id", "observed_value", "ran_at", "detected_anomaly",
+        )
+        # 2 failing runs for the right rule -- ordered DESC, so r3 first.
+        run_ids = [r[0] for r in qr.rows]
+        assert run_ids == ["r3", "r2"]
+        # detected_anomaly is `NOT passed`, so TRUE for the 2 failures.
+        assert all(r[3] is True for r in qr.rows)
+
+    def test_compile_emits_select_from_quality_runs(self) -> None:
+        con = _populated_db()
+        intent = QueryIntent(source="orders", metrics=["revenue_anomalies"])
+        compiled = compile_intent(intent, Catalog(con))
+        rendered = compiled.render()
+        assert "FROM gibran_quality_runs" in rendered
+        assert "rule_id = 'orders_revenue_anomaly'" in rendered
+        assert "passed = FALSE" in rendered
+
+    def test_cannot_combine_with_dimensions(self) -> None:
+        con = _populated_db()
+        ident, gov = _admin(con)
+        intent = QueryIntent(
+            source="orders", metrics=["revenue_anomalies"],
+            dimensions=[{"id": "orders.region"}],
+        )
+        with pytest.raises(IntentValidationError, match="cannot be combined with intent.dimensions"):
+            validate_intent(intent, gov.preview_schema(ident, "orders"))

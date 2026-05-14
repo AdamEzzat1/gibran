@@ -49,6 +49,8 @@ def test_loads_valid_yaml() -> None:
         "revenue_yoy",
         # Phase 3 cohort_filter primitive addition:
         "jan_to_feb_returners",
+        # Phase 3 anomaly_query primitive addition:
+        "revenue_anomalies",
     }
     assert validated.metric_dependencies["avg_order_value"] == frozenset(
         {"order_count", "gross_revenue"}
@@ -67,6 +69,7 @@ def test_loads_valid_yaml() -> None:
     assert {q.id for q in validated.config.quality_rules} == {
         "orders_amount_not_null",
         "orders_amount_range",
+        "orders_revenue_anomaly",
     }
     assert {f.id for f in validated.config.freshness_rules} == {"orders_freshness_24h"}
 
@@ -77,8 +80,8 @@ def test_apply_populates_catalog_and_governance() -> None:
     counts = apply_config(con, validated)
 
     assert counts == {
-        "sources": 1, "columns": 6, "dimensions": 2, "metrics": 18,
-        "roles": 2, "policies": 2, "quality_rules": 2, "freshness_rules": 1,
+        "sources": 1, "columns": 6, "dimensions": 2, "metrics": 19,
+        "roles": 2, "policies": 2, "quality_rules": 3, "freshness_rules": 1,
     }
 
     assert [r[0] for r in con.execute("SELECT source_id FROM gibran_sources").fetchall()] == ["orders"]
@@ -89,6 +92,7 @@ def test_apply_populates_catalog_and_governance() -> None:
         "gross_revenue", "jan_to_feb_returners",
         "last_amount", "max_amount", "median_amount", "min_amount",
         "order_count", "p95_amount", "paid_funnel", "revenue_7d_rolling",
+        "revenue_anomalies",
         "revenue_mom", "revenue_per_paid_order", "revenue_yoy", "unique_customers",
     ]
 
@@ -128,8 +132,8 @@ def test_apply_idempotent() -> None:
     validated = load_config(FIXTURES / "gibran.yaml")
     apply_config(con, validated)
     apply_config(con, validated)
-    assert con.execute("SELECT COUNT(*) FROM gibran_metric_versions").fetchone()[0] == 18
-    assert con.execute("SELECT COUNT(*) FROM gibran_metrics").fetchone()[0] == 18
+    assert con.execute("SELECT COUNT(*) FROM gibran_metric_versions").fetchone()[0] == 19
+    assert con.execute("SELECT COUNT(*) FROM gibran_metrics").fetchone()[0] == 19
     # avg_order_value (ratio) declares 2 deps; revenue_mom (period_over_period)
     # declares 1 dep on its base_metric (gross_revenue); revenue_per_paid_order
     # (expression) deps are not tracked in V1 (loader only extracts deps for
@@ -139,7 +143,7 @@ def test_apply_idempotent() -> None:
     assert con.execute("SELECT COUNT(*) FROM gibran_role_attributes").fetchone()[0] == 1
     assert con.execute("SELECT COUNT(*) FROM gibran_policies").fetchone()[0] == 2
     assert con.execute("SELECT COUNT(*) FROM gibran_policy_columns").fetchone()[0] == 3
-    assert con.execute("SELECT COUNT(*) FROM gibran_quality_rules").fetchone()[0] == 2
+    assert con.execute("SELECT COUNT(*) FROM gibran_quality_rules").fetchone()[0] == 3
     assert con.execute("SELECT COUNT(*) FROM gibran_freshness_rules").fetchone()[0] == 1
 
 
@@ -299,6 +303,7 @@ class TestGovernanceEntities:
         assert rules == {
             "orders_amount_not_null": "cheap",
             "orders_amount_range": "expensive",
+            "orders_revenue_anomaly": "expensive",
         }
 
     def test_freshness_rule_persists(self) -> None:
@@ -340,10 +345,12 @@ class TestGovernanceEntities:
             (FIXTURES / "gibran.yaml").read_text(encoding="utf-8"), encoding="utf-8"
         )
         apply_config(con, load_config(yaml_path))
-        assert con.execute("SELECT COUNT(*) FROM gibran_quality_rules").fetchone()[0] == 2
+        assert con.execute("SELECT COUNT(*) FROM gibran_quality_rules").fetchone()[0] == 3
 
         text = yaml_path.read_text(encoding="utf-8")
-        # Drop the orders_amount_range block (last quality_rules entry)
+        # Drop everything from orders_amount_range onwards (which also drops
+        # orders_revenue_anomaly added in Phase 3). Leaves only the first
+        # rule, orders_amount_not_null.
         cut = text.split("  - id: orders_amount_range")[0]
         # Need to keep everything before, and the freshness_rules block
         rest = text.split("freshness_rules:")[1]
