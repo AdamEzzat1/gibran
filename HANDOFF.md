@@ -6,10 +6,15 @@ with `STATUS.md` (current-state snapshot) but is forward-looking: what to
 build next, why, and in what order.
 
 Commit checkpoint: `c77f911` — Initial commit: Gibran V1.
-Last verified: Tier 2 Items 6 + 7 complete (time-bound policies + audit-log
-redaction; schema-drift detection in `gibran sync`); Tier 3 CTE
-infrastructure landed (CompiledQuery/CTE dataclasses; execution layer
-walks columns through CTE bodies). 364 tests passing.
+Last verified: Tier 2 + Tier 3 (cohort_retention / funnel) substantially
+complete. Items shipped: time-bound policies + audit-log redaction
+(Item 6); schema-drift detection in `gibran sync` (Item 7); CTE
+infrastructure with CompiledQuery / CTE dataclasses and CTE-aware
+column walker; cohort_retention + funnel shape primitives (Tier 3);
+six aggregate primitives -- weighted_avg, stddev_samp, stddev_pop,
+count_distinct, count_distinct_approx, mode (Item 5); example_values
+sampling for low-cardinality public columns (Item 8); performance
+baselines in `tests/benchmarks/bench.py` (Item 9). 409 tests passing.
 
 ---
 
@@ -339,8 +344,19 @@ high-leverage); (b) benchmarks become a prerequisite for any perf work;
    can't be probed land in a separate `unreachable` list (not knowing
    whether there's drift is distinct from there being drift). +15 tests.*
 8. **Populate `example_values`** for low-cardinality public columns
+   *Done. Migration 0008 adds `example_values JSON` to
+   gibran_columns; `gibran.sync.example_values.populate_example_values`
+   runs after `apply_config` and samples each public column with
+   cardinality <= 20. Hard gate on sensitivity (PII never sampled);
+   per-column opt-out via `expose_examples: false`. `preview_schema`
+   surfaces values on `ColumnView.example_values`. +8 tests.*
    (prerequisite for `gibran describe` to be useful + any future NL layer).
-9. **Benchmarks** — `tests/benchmarks/` with small/medium/large
+9. **Benchmarks** — *Done. `tests/benchmarks/bench.py` measures
+   compile-only, end-to-end count, and end-to-end cohort_retention at
+   1k/10k/50k row sizes. Not collected by `pytest tests` (filename
+   doesn't start with `test_`); a small smoke test in
+   `tests/test_benchmarks_smoke.py` keeps the code in CI coverage. Run
+   via `python -m tests.benchmarks.bench`.* `tests/benchmarks/` with small/medium/large
    measurements. Prerequisite for any perf work.
 
 ### Tier 3 — architectural, unlocks the next round
@@ -355,8 +371,18 @@ high-leverage); (b) benchmarks become a prerequisite for any perf work;
     names (filtered) from pass-through column refs (counted). +15
     tests (test_cte_infra.py).* Standalone refactor. Compiler learns
     to emit `WITH a AS (...), b AS (...) SELECT ...`. Spec in §3.2.
-11. **`cohort_retention` metric primitive** (on top of CTE infra).
-12. **`funnel` metric primitive** (on top of CTE infra).
+11. **`cohort_retention` metric primitive** — *Done. Three-CTE shape
+    (cohorts -> retention -> cohort_sizes); output shape
+    (cohort_start, periods_since_cohort, retained_count, cohort_size,
+    retention_rate). DSL validator enforces that the metric is the
+    sole entry in the intent with no dimensions/filters/having/order_by
+    -- the primitive owns the whole query shape.*
+12. **`funnel` metric primitive** — *Done. One CTE per step plus
+    `step_counts` aggregator; output shape (step_name, step_index,
+    entity_count, conversion_from_previous, conversion_from_first).
+    Conversion ratios via LAG + FIRST_VALUE window functions over the
+    ordered step list. Same single-metric / no-modifier constraints as
+    cohort_retention.*
 13. **Dimension hierarchies + reusable filter sets + intent-level time grain**
     (Analytics depth).
 
@@ -429,7 +455,7 @@ src/gibran/
     migrations.py    # migration runner
   cli/
     main.py          # typer subcommands: init / sync / check / query / register
-migrations/          # 0001 catalog -> 0007 time_bound_policies
+migrations/          # 0001 catalog -> 0008 example_values
 tests/
   fixtures/gibran.yaml # canonical test config with 6 metrics, 2 roles, etc.
   test_*.py          # 246 tests across 10 files

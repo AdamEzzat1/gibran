@@ -506,8 +506,8 @@ src/gibran/
   cli/                # typer entrypoint
   _sql.py             # qident, render_literal
   _source_dispatch.py # source_type -> FROM-clause snippet
-migrations/           # 0001 catalog -> 0007 time_bound_policies
-tests/                # 334 tests across 17 files
+migrations/           # 0001 catalog -> 0008 example_values
+tests/                # 409 tests across 21 files (+ benchmarks/)
 prompts/
   architect_layer.md  # refined architect prompt with fixed constraints
 HANDOFF.md            # forward-looking priority list
