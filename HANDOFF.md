@@ -6,6 +6,8 @@ with `STATUS.md` (current-state snapshot) but is forward-looking: what to
 build next, why, and in what order.
 
 Commit checkpoint: `c77f911` — Initial commit: Rumi V1.
+Last verified: `4b0e8a1` — Tier 2 Item 6 complete (time-bound policies +
+audit-log redaction). 334 tests passing.
 
 ---
 
@@ -18,7 +20,7 @@ execution belong to DuckDB. The wedge is *governed analytics*: YAML config
 defines sources, metrics, dimensions, roles, policies, and data-quality
 rules; queries (either raw SQL or a structured DSL) flow through an
 identity-aware governance layer that rewrites and audits every attempt.
-246 automated tests pass; wheel installs cleanly into a fresh venv.
+334 automated tests pass; wheel installs cleanly into a fresh venv.
 
 ## 2. Current state, briefly
 
@@ -325,6 +327,9 @@ high-leverage); (b) benchmarks become a prerequisite for any perf work;
    `stddev_pop`, `count_distinct`, `count_distinct_approx`, `mode`,
    `top_k`. ~30 lines for the lot.
 6. **Time-bound policies + audit-log SQL redaction** (Sec/Gov A-move).
+   *Done at `4b0e8a1` (2026-05-13). `valid_until TIMESTAMP` on rumi_policies
+   with evaluate-time expiry check; literal redactor over both
+   `generated_sql` and `nl_prompt` for pii/restricted columns. +40 tests.*
 7. **Schema-drift detection in `rumi sync`** (DQ small-but-high-leverage).
 8. **Populate `example_values`** for low-cardinality public columns
    (prerequisite for `rumi describe` to be useful + any future NL layer).
@@ -409,7 +414,7 @@ src/rumi/
     migrations.py    # migration runner
   cli/
     main.py          # typer subcommands: init / sync / check / query / register
-migrations/          # 0001 catalog -> 0005 metric_primitives
+migrations/          # 0001 catalog -> 0007 time_bound_policies
 tests/
   fixtures/rumi.yaml # canonical test config with 6 metrics, 2 roles, etc.
   test_*.py          # 246 tests across 10 files
