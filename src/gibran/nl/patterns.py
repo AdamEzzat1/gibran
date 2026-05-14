@@ -58,6 +58,16 @@ _GRAIN_WORDS = {
 }
 
 
+_MONTH_NAMES = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+    "jun": 6, "jul": 7, "aug": 8,
+    "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
 def _resolve_metric(name: str, schema: AllowedSchema) -> str | None:
     """Map a user-supplied phrase to a metric_id. Exact-match wins over
     substring; case-insensitive; checks both metric_id and display_name."""
@@ -116,6 +126,16 @@ def _resolve_temporal_dim(schema: AllowedSchema) -> str | None:
     for d in schema.dimensions:
         if d.dim_type == "temporal":
             return d.dimension_id
+    return None
+
+
+def _resolve_temporal_column(schema: AllowedSchema) -> str | None:
+    """Return the underlying column name of the first temporal dimension.
+    Used by period-filter patterns ('in 2026') that emit a WHERE clause
+    on the temporal column directly, not a grouping dimension."""
+    for d in schema.dimensions:
+        if d.dim_type == "temporal":
+            return d.column_name
     return None
 
 
@@ -193,6 +213,48 @@ def metric_by_dim(m: re.Match, schema: AllowedSchema) -> dict:
         "source": schema.source_id,
         "metrics": [metric_id],
         "dimensions": [{"id": dim_id}],
+    }
+
+
+@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+in\s+(?:(\w+)\s+)?(\d{4})$")
+def metric_in_period(m: re.Match, schema: AllowedSchema) -> dict:
+    """<metric> in <year> | <metric> in <month-name> <year>.
+
+    Emits a half-open date-range filter (>= period_start, < period_end)
+    on the first temporal dimension's underlying column. Half-open avoids
+    the TIMESTAMP edge case where BETWEEN '..-01' AND '..-31' silently
+    drops anything at 23:59:59.
+
+    Bare month names without a year (e.g. "in January") need a relative-
+    time anchor and are deferred to Phase 3's `relative_time_filter`."""
+    metric_id = _resolve_metric(m.group(1), schema)
+    if not metric_id:
+        raise NoMatch()
+    col_name = _resolve_temporal_column(schema)
+    if col_name is None:
+        raise NoMatch()
+    year = int(m.group(3))
+    month_word = m.group(2)
+    if month_word is not None:
+        month = _MONTH_NAMES.get(month_word.lower())
+        if month is None:
+            raise NoMatch()
+        start = f"{year}-{month:02d}-01"
+        next_month, next_year = (1, year + 1) if month == 12 else (month + 1, year)
+        end = f"{next_year}-{next_month:02d}-01"
+    else:
+        start = f"{year}-01-01"
+        end = f"{year + 1}-01-01"
+    return {
+        "source": schema.source_id,
+        "metrics": [metric_id],
+        "filters": [{
+            "op": "and",
+            "args": [
+                {"op": "gte", "column": col_name, "value": start},
+                {"op": "lt", "column": col_name, "value": end},
+            ],
+        }],
     }
 
 

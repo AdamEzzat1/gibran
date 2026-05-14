@@ -144,6 +144,83 @@ class TestTopN:
 
 
 # ---------------------------------------------------------------------------
+# Pattern: metric_in_period
+# ---------------------------------------------------------------------------
+
+class TestMetricInPeriod:
+    def test_year_only(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue in 2026", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["gross_revenue"]
+        assert m.intent["filters"] == [{
+            "op": "and",
+            "args": [
+                {"op": "gte", "column": "order_date", "value": "2026-01-01"},
+                {"op": "lt", "column": "order_date", "value": "2027-01-01"},
+            ],
+        }]
+
+    def test_month_and_year(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue in January 2026", schema)
+        assert m is not None
+        assert m.intent["filters"] == [{
+            "op": "and",
+            "args": [
+                {"op": "gte", "column": "order_date", "value": "2026-01-01"},
+                {"op": "lt", "column": "order_date", "value": "2026-02-01"},
+            ],
+        }]
+
+    def test_december_rolls_year_in_upper_bound(self) -> None:
+        # December's half-open upper bound is January of next year -- this
+        # is the only month where the year increments.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue in December 2026", schema)
+        assert m is not None
+        assert m.intent["filters"][0]["args"][1] == {
+            "op": "lt", "column": "order_date", "value": "2027-01-01",
+        }
+
+    def test_month_abbreviation_accepted(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue in Feb 2026", schema)
+        assert m is not None
+        assert m.intent["filters"][0]["args"][0]["value"] == "2026-02-01"
+
+    def test_unrecognized_month_returns_none(self) -> None:
+        # "foo" isn't a month name -- pattern raises NoMatch, falls through
+        # to single_metric which also fails (no metric named "gross revenue
+        # in foo 2026"). Tier 5 invariant: no fabrication.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue in foo 2026", schema)
+        assert m is None
+
+    def test_end_to_end_filter_applied(self) -> None:
+        # analyst_west sees only west rows; in 2026 those are o1 (Jan, $100)
+        # and o3 (Feb, $50). Restricting to February drops o1.
+        con = _populated_db()
+        gov = DefaultGovernance(con)
+        ident = IdentityContext(
+            user_id="aw", role_id="analyst_west",
+            attributes={"region": "west"}, source="test",
+        )
+        result = run_nl_query(
+            con, gov, ident, "gross revenue in February 2026", "orders",
+        )
+        assert result.match is not None
+        assert result.run_result is not None
+        qr = result.run_result.query_result
+        assert qr is not None and qr.status == "ok"
+        # One scalar row: only o3 (50, west, Feb 15) matches. Compare on the
+        # numeric value -- DuckDB returns Decimal for the SUM of a DECIMAL
+        # column, and Decimal('50.00') == 50 is True via numeric coercion.
+        assert len(qr.rows) == 1
+        assert qr.rows[0][0] == 50
+
+
+# ---------------------------------------------------------------------------
 # Pattern: metric_filtered_by_value (uses example_values)
 # ---------------------------------------------------------------------------
 
