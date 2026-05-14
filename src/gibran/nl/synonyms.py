@@ -51,6 +51,36 @@ GRAIN_WORDS: dict[str, str] = {
 OVER_TIME_WORDS: tuple[str, ...] = ("trend", "over time", "across time")
 
 
+# Type-keyword routing: words that signal "find a metric of this type."
+# Used by metric_by_type_keyword to route phrases like "unique customers"
+# to a count_distinct metric, "max order amount" to a max metric, etc.
+# Multiple keywords can map to the same primitive group (avg / mean,
+# unique / distinct, max / maximum, etc.). The pattern filters
+# AllowedSchema.metrics down to the keyword's primitive types BEFORE
+# substring-matching on the remaining noun, so "max amount" resolves
+# only against type=max metrics even if other metrics share the noun.
+TYPE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "unique":   ("count_distinct", "count_distinct_approx"),
+    "distinct": ("count_distinct", "count_distinct_approx"),
+    "max":      ("max",),
+    "maximum":  ("max",),
+    "min":      ("min",),
+    "minimum":  ("min",),
+    "first":    ("first_value",),
+    "last":     ("last_value",),
+    "average":  ("avg",),
+    "avg":      ("avg",),
+    "mean":     ("avg",),
+    "median":   ("median",),
+}
+
+
+# "This period" keywords for the metric_this_period pattern. Each maps
+# to a DuckDB DATE_TRUNC unit so the builder can compute the period
+# bounds relative to today.
+THIS_PERIOD_WORDS: tuple[str, ...] = ("week", "month", "quarter", "year")
+
+
 # Month-name lookup -- full English names plus standard 3-letter
 # abbreviations (and "sept" since it shows up in real text). Used by
 # metric_in_period to resolve a month word to its 1-12 integer.

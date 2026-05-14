@@ -206,6 +206,290 @@ class TestMetricOverTime:
 
 
 # ---------------------------------------------------------------------------
+# Pattern: metric_by_type_keyword (unique / max / min / avg / first / last / median)
+# ---------------------------------------------------------------------------
+
+class TestMetricByTypeKeyword:
+    def test_unique_routes_to_count_distinct(self) -> None:
+        # The fixture has unique_customers (count_distinct on customer_email).
+        schema = _schema(_populated_db())
+        m = nl_to_intent("unique customers", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["unique_customers"]
+
+    def test_distinct_synonym(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("distinct customers", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["unique_customers"]
+
+    def test_max_routes_to_max_type_only(self) -> None:
+        # "amount" appears in many metric display names (Max Order Amount,
+        # Min Order Amount, Average Order Amount, ...). The pattern must
+        # filter by type=max FIRST so only max_amount is a candidate.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("max order amount", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["max_amount"]
+
+    def test_min_routes_to_min_type_only(self) -> None:
+        # Symmetric to max -- if the type filter weren't applied first
+        # this could resolve to max_amount alphabetically.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("min order amount", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["min_amount"]
+
+    def test_average_synonyms(self) -> None:
+        schema = _schema(_populated_db())
+        for phrase in ("average order amount", "avg amount", "mean amount"):
+            m = nl_to_intent(phrase, schema)
+            assert m is not None, f"failed: {phrase!r}"
+            assert m.intent["metrics"] == ["avg_amount"], phrase
+
+    def test_first_last_route_to_value_aggregates(self) -> None:
+        schema = _schema(_populated_db())
+        m_first = nl_to_intent("first order amount", schema)
+        m_last = nl_to_intent("last order amount", schema)
+        assert m_first is not None and m_first.intent["metrics"] == ["first_amount"]
+        assert m_last is not None and m_last.intent["metrics"] == ["last_amount"]
+
+    def test_median_routes_to_median_type(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("median amount", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["median_amount"]
+
+    def test_wrong_type_for_keyword_returns_none(self) -> None:
+        # "max gross revenue" -- gross_revenue is type=sum, not max.
+        # No fabrication; returns None rather than coercing.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("max gross revenue", schema)
+        assert m is None
+
+    def test_keyword_with_no_matching_metric_returns_none(self) -> None:
+        # No count_distinct metric on amount -> "unique amount" no-match.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("unique amount", schema)
+        assert m is None
+
+
+# ---------------------------------------------------------------------------
+# Pattern: multi_metric
+# ---------------------------------------------------------------------------
+
+class TestMultiMetric:
+    def test_two_metrics_bare(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue and order_count", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["gross_revenue", "order_count"]
+        assert "dimensions" not in m.intent or m.intent["dimensions"] == []
+
+    def test_two_metrics_with_by_dim(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue and order_count by region", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["gross_revenue", "order_count"]
+        assert m.intent["dimensions"] == [{"id": "orders.region"}]
+
+    def test_show_me_prefix(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("show me gross revenue and order_count", schema)
+        assert m is not None
+        assert m.intent["metrics"] == ["gross_revenue", "order_count"]
+
+    def test_duplicate_metrics_rejected(self) -> None:
+        # "X and X" is a configuration mistake; no fabricated dedupe.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue and gross_revenue", schema)
+        assert m is None
+
+    def test_unresolved_second_metric_returns_none(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue and bogus_metric", schema)
+        assert m is None
+
+
+# ---------------------------------------------------------------------------
+# Pattern: metric_filter_compound (two AND-ed eq filters)
+# ---------------------------------------------------------------------------
+
+class TestMetricFilterCompound:
+    def test_two_filters_different_columns(self) -> None:
+        # "west" -> region, "paid" -> status -- two columns, two filters.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue for west and paid", schema)
+        assert m is not None
+        cols = {f["column"] for f in m.intent["filters"]}
+        assert cols == {"region", "status"}
+        vals = {f["value"] for f in m.intent["filters"]}
+        assert vals == {"west", "paid"}
+
+    def test_show_me_prefix(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("show me gross revenue for west and paid", schema)
+        assert m is not None
+        assert len(m.intent["filters"]) == 2
+
+    def test_unresolved_value_returns_none(self) -> None:
+        # "bogus" isn't in any example_values -- no fabrication.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue for bogus and paid", schema)
+        assert m is None
+
+
+# ---------------------------------------------------------------------------
+# Pattern: metric_in_date_range (explicit YYYY-MM-DD to YYYY-MM-DD)
+# ---------------------------------------------------------------------------
+
+class TestMetricInDateRange:
+    def test_full_date_range(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "gross revenue from 2026-01-01 to 2026-02-01", schema,
+        )
+        assert m is not None
+        assert m.intent["filters"] == [{
+            "op": "and",
+            "args": [
+                {"op": "gte", "column": "order_date", "value": "2026-01-01"},
+                {"op": "lt", "column": "order_date", "value": "2026-02-01"},
+            ],
+        }]
+
+    def test_invalid_date_format_returns_none(self) -> None:
+        schema = _schema(_populated_db())
+        # "bogus" doesn't match the ISO YYYY-MM-DD regex.
+        m = nl_to_intent("gross revenue from 2026-01-01 to bogus", schema)
+        assert m is None
+
+    def test_show_me_prefix(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "show me gross revenue from 2026-01-01 to 2026-02-01", schema,
+        )
+        assert m is not None
+        assert m.intent["metrics"] == ["gross_revenue"]
+
+
+# ---------------------------------------------------------------------------
+# Pattern: metric_this_period (this week|month|quarter|year)
+# ---------------------------------------------------------------------------
+
+class TestMetricThisPeriod:
+    @pytest.fixture(autouse=True)
+    def _fix_today(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Pin today to Thursday, May 14, 2026 (Q2). Week starts Mon May 11.
+        monkeypatch.setattr(
+            "gibran.nl.patterns._today",
+            lambda: date(2026, 5, 14),
+        )
+
+    def test_this_year(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue this year", schema)
+        assert m is not None
+        assert m.intent["filters"][0]["args"] == [
+            {"op": "gte", "column": "order_date", "value": "2026-01-01"},
+            {"op": "lt",  "column": "order_date", "value": "2027-01-01"},
+        ]
+
+    def test_this_quarter_q2(self) -> None:
+        # May 14 is in Q2 -- runs Apr 1 to Jul 1.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue this quarter", schema)
+        assert m is not None
+        assert m.intent["filters"][0]["args"] == [
+            {"op": "gte", "column": "order_date", "value": "2026-04-01"},
+            {"op": "lt",  "column": "order_date", "value": "2026-07-01"},
+        ]
+
+    def test_this_month(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue this month", schema)
+        assert m is not None
+        assert m.intent["filters"][0]["args"] == [
+            {"op": "gte", "column": "order_date", "value": "2026-05-01"},
+            {"op": "lt",  "column": "order_date", "value": "2026-06-01"},
+        ]
+
+    def test_this_week_iso_monday_start(self) -> None:
+        # Thu May 14 -> Monday of that week is May 11; next Monday is May 18.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue this week", schema)
+        assert m is not None
+        assert m.intent["filters"][0]["args"] == [
+            {"op": "gte", "column": "order_date", "value": "2026-05-11"},
+            {"op": "lt",  "column": "order_date", "value": "2026-05-18"},
+        ]
+
+    def test_unknown_period_returns_none(self) -> None:
+        # "decade" isn't in THIS_PERIOD_WORDS -- the regex won't match.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue this decade", schema)
+        assert m is None
+
+
+# ---------------------------------------------------------------------------
+# Pattern: top_n_with_having
+# ---------------------------------------------------------------------------
+
+class TestTopNWithHaving:
+    def test_top_n_with_having_same_metric(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "top 5 region by gross revenue where gross revenue > 100",
+            schema,
+        )
+        assert m is not None
+        assert m.intent["metrics"] == ["gross_revenue"]
+        assert m.intent["limit"] == 5
+        assert m.intent["order_by"][0]["direction"] == "desc"
+        assert m.intent["having"] == [{
+            "op": "gt", "metric": "gross_revenue", "value": 100,
+        }]
+
+    def test_top_n_with_having_gte(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "top 3 region by gross revenue where gross revenue >= 50",
+            schema,
+        )
+        assert m is not None
+        assert m.intent["having"][0]["op"] == "gte"
+        assert m.intent["having"][0]["value"] == 50
+
+    def test_biggest_synonym_and_eq(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "biggest 2 region by order_count where order_count = 1",
+            schema,
+        )
+        assert m is not None
+        assert m.intent["having"][0]["op"] == "eq"
+
+    def test_having_on_different_metric_projects_both(self) -> None:
+        # If the HAVING metric differs from the ordering metric, both
+        # are projected (HAVING needs the SELECT alias to refer to).
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "top 5 region by gross_revenue where order_count > 0",
+            schema,
+        )
+        assert m is not None
+        assert set(m.intent["metrics"]) == {"gross_revenue", "order_count"}
+
+    def test_unknown_metric_in_having_returns_none(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent(
+            "top 5 region by gross revenue where bogus > 100",
+            schema,
+        )
+        assert m is None
+
+
+# ---------------------------------------------------------------------------
 # Pattern: top_n_by_metric
 # ---------------------------------------------------------------------------
 

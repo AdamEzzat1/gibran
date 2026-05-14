@@ -113,6 +113,56 @@ metrics:
       - name: paid
         condition: status = 'paid'
     description: Two-step funnel -- ordered, then paid.
+  # Phase 3 NL fixture additions: simple aggregates covering the
+  # type-keyword patterns (unique / max / min / avg / median / first / last).
+  - id: unique_customers
+    source: orders
+    display_name: Unique Customers
+    type: count_distinct
+    column: customer_email
+    description: Distinct customer count.
+  - id: avg_amount
+    source: orders
+    display_name: Average Order Amount
+    type: avg
+    expression: amount
+    unit: USD
+    description: Mean order amount.
+  - id: max_amount
+    source: orders
+    display_name: Max Order Amount
+    type: max
+    expression: amount
+    unit: USD
+    description: Largest single order amount.
+  - id: min_amount
+    source: orders
+    display_name: Min Order Amount
+    type: min
+    expression: amount
+    unit: USD
+    description: Smallest single order amount.
+  - id: median_amount
+    source: orders
+    display_name: Median Order Amount
+    type: median
+    column: amount
+    unit: USD
+    description: Median order amount.
+  - id: first_amount
+    source: orders
+    display_name: First Order Amount
+    type: first_value
+    column: amount
+    unit: USD
+    description: First order amount by scan order.
+  - id: last_amount
+    source: orders
+    display_name: Last Order Amount
+    type: last_value
+    column: amount
+    unit: USD
+    description: Last order amount by scan order.
 
 roles:
   - id: analyst_west
