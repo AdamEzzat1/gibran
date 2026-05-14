@@ -14,6 +14,7 @@ Tier 5 invariants this file pins:
 """
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -347,6 +348,72 @@ class TestMetricInPeriod:
         # column, and Decimal('50.00') == 50 is True via numeric coercion.
         assert len(qr.rows) == 1
         assert qr.rows[0][0] == 50
+
+
+# ---------------------------------------------------------------------------
+# Pattern: metric_last_n_period (clock-dependent; tests pin date via monkeypatch)
+# ---------------------------------------------------------------------------
+
+class TestMetricLastNPeriod:
+    @pytest.fixture(autouse=True)
+    def _fix_today(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Pin date.today() at 2026-05-14 so the assertions on filter
+        # values are deterministic. The pattern uses gibran.nl.patterns._today
+        # specifically to make this monkeypatch trivial.
+        monkeypatch.setattr(
+            "gibran.nl.patterns._today",
+            lambda: date(2026, 5, 14),
+        )
+
+    def test_last_30_days(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue last 30 days", schema)
+        assert m is not None
+        # start = 2026-05-14 - 30 days = 2026-04-14
+        # end   = 2026-05-14 + 1 day  = 2026-05-15 (exclusive upper bound)
+        assert m.intent["filters"] == [{
+            "op": "and",
+            "args": [
+                {"op": "gte", "column": "order_date", "value": "2026-04-14"},
+                {"op": "lt", "column": "order_date", "value": "2026-05-15"},
+            ],
+        }]
+
+    def test_last_3_months_uses_30_day_approximation(self) -> None:
+        # Phase 1 approximation: 3 months = 90 days.
+        # 2026-05-14 - 90 days = 2026-02-13.
+        # Phase 3's relative_time_filter will replace with calendar math.
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue last 3 months", schema)
+        assert m is not None
+        assert m.intent["filters"][0]["args"][0]["value"] == "2026-02-13"
+
+    def test_past_synonym(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue past 7 days", schema)
+        assert m is not None
+        # 2026-05-14 - 7 days = 2026-05-07
+        assert m.intent["filters"][0]["args"][0]["value"] == "2026-05-07"
+
+    def test_singular_unit_accepted(self) -> None:
+        # "1 day" (singular) should match the same regex as "30 days".
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue last 1 day", schema)
+        assert m is not None
+        assert m.intent["filters"][0]["args"][0]["value"] == "2026-05-13"
+
+    def test_last_1_year(self) -> None:
+        # 1 year = 365 days (approximation).
+        schema = _schema(_populated_db())
+        m = nl_to_intent("gross revenue last 1 year", schema)
+        assert m is not None
+        # 2026-05-14 - 365 days = 2025-05-14
+        assert m.intent["filters"][0]["args"][0]["value"] == "2025-05-14"
+
+    def test_invalid_metric_returns_none(self) -> None:
+        schema = _schema(_populated_db())
+        m = nl_to_intent("bogus_metric last 30 days", schema)
+        assert m is None
 
 
 # ---------------------------------------------------------------------------

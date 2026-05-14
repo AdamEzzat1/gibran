@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any, Callable
 
 from gibran.governance.types import AllowedSchema
@@ -58,6 +59,20 @@ _TOP_ALT = "|".join(TOP_WORDS)
 _BOTTOM_ALT = "|".join(BOTTOM_WORDS)
 _GRAIN_ALT = "|".join(GRAIN_WORDS)
 _OVER_TIME_ALT = "|".join(OVER_TIME_WORDS)
+
+
+# Approximate day-counts per period unit. Used by metric_last_n_period.
+# Phase 3's relative_time_filter primitive replaces these approximations
+# with calendar-aware arithmetic (e.g. dateutil.relativedelta).
+_PERIOD_UNIT_TO_DAYS: dict[str, int] = {
+    "day": 1, "week": 7, "month": 30, "year": 365,
+}
+
+
+def _today() -> date:
+    """Indirection over date.today() so tests can monkeypatch a fixed date
+    without touching the public nl_to_intent signature."""
+    return date.today()
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +328,41 @@ def metric_in_period(m: re.Match, schema: AllowedSchema) -> dict:
             "args": [
                 {"op": "gte", "column": col_name, "value": start},
                 {"op": "lt", "column": col_name, "value": end},
+            ],
+        }],
+    }
+
+
+@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+(?:last|past)\s+(\d+)\s+(days?|weeks?|months?|years?)$")
+def metric_last_n_period(m: re.Match, schema: AllowedSchema) -> dict:
+    """<metric> last|past N days|weeks|months|years -- half-open filter
+    [today - N units, today + 1 day) on the first temporal column.
+
+    Month/year units approximate (1 month = 30 days, 1 year = 365 days).
+    Phase 3's relative_time_filter primitive replaces this with calendar-
+    aware arithmetic. The approximation is acceptable for typical
+    "rolling window" questions where being off by 1-3 days is rounding,
+    not meaning."""
+    metric_id = _resolve_metric(m.group(1), schema)
+    if not metric_id:
+        raise NoMatch()
+    col_name = _resolve_temporal_column(schema)
+    if col_name is None:
+        raise NoMatch()
+    n = int(m.group(2))
+    unit_singular = m.group(3).rstrip("s").lower()
+    unit_days = _PERIOD_UNIT_TO_DAYS[unit_singular]
+    today = _today()
+    start = today - timedelta(days=n * unit_days)
+    end = today + timedelta(days=1)  # exclusive upper bound = end of today
+    return {
+        "source": schema.source_id,
+        "metrics": [metric_id],
+        "filters": [{
+            "op": "and",
+            "args": [
+                {"op": "gte", "column": col_name, "value": start.isoformat()},
+                {"op": "lt", "column": col_name, "value": end.isoformat()},
             ],
         }],
     }
