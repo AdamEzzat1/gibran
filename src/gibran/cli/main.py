@@ -1034,5 +1034,74 @@ def _parse_attrs(attr: list[str]) -> dict[str, str]:
     return attributes
 
 
+@app.command()
+def ask(
+    text: str = typer.Argument(
+        ..., help='Natural-language question, e.g. "show me gross revenue by region"'
+    ),
+    source: str = typer.Option(
+        ..., "--source", "-s",
+        help="Source to query (the NL layer scopes to one source per request)",
+    ),
+    role: str = typer.Option(..., "--role", "-r"),
+    attr: list[str] = typer.Option(
+        [], "--attr", help="role attribute, e.g. region=west",
+    ),
+) -> None:
+    """Pattern-template NL layer: match the question against a fixed set
+    of templates, resolve slots against the role's AllowedSchema, and
+    execute. No invention -- if no pattern matches AND resolves, the
+    command prints "I don't know how to answer that" and exits with
+    code 4. This is the Tier 5 non-LLM design (per HANDOFF.md): an
+    NL layer that can FAIL to parse but cannot fabricate references."""
+    from gibran.governance.default import DefaultGovernance
+    from gibran.governance.types import IdentityContext
+    from gibran.nl.runner import run_nl_query
+
+    root = _project_root()
+    db = _db_path(root)
+    if not db.exists():
+        typer.echo(f"error: no DB at {db}", err=True)
+        raise typer.Exit(code=1)
+
+    identity = IdentityContext(
+        user_id=f"cli:{role}", role_id=role,
+        attributes=_parse_attrs(attr), source="cli",
+    )
+    con = duckdb.connect(str(db))
+    try:
+        gov = DefaultGovernance(con)
+        result = run_nl_query(con, gov, identity, text, source)
+    finally:
+        con.close()
+
+    if result.match is None:
+        typer.echo("I don't know how to answer that.", err=True)
+        typer.echo(
+            "(The NL layer matches a fixed set of patterns; rephrase or "
+            "use `gibran query --dsl` directly.)",
+            err=True,
+        )
+        raise typer.Exit(code=4)
+
+    typer.echo(f"-- Pattern: {result.match.pattern_name} --")
+    import json as _json
+    typer.echo(f"-- DSL Intent --")
+    typer.echo(_json.dumps(result.match.intent, indent=2))
+    qr = result.run_result.query_result if result.run_result else None
+    if qr is None or qr.status != "ok":
+        typer.echo(
+            f"-- Execution failed: "
+            f"{getattr(qr, 'deny_reason', None) or getattr(qr, 'error_message', None)}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    typer.echo("-- Result --")
+    if qr.columns:
+        typer.echo("\t".join(qr.columns))
+    for row in (qr.rows or ()):
+        typer.echo("\t".join(str(v) for v in row))
+
+
 if __name__ == "__main__":
     app()

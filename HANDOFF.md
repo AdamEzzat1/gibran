@@ -6,18 +6,20 @@ with `STATUS.md` (current-state snapshot) but is forward-looking: what to
 build next, why, and in what order.
 
 Commit checkpoint: `c77f911` — Initial commit: Gibran V1.
-Last verified: Tier 2 + Tier 3 + most of Tier 4 shipped. Items: time-
-bound policies + audit-log redaction (Item 6); schema-drift detection
-(Item 7); CTE infrastructure; cohort_retention + funnel shape
-primitives; six aggregate primitives (weighted_avg, stddev_samp,
-stddev_pop, count_distinct, count_distinct_approx, mode -- Item 5);
-example_values sampling (Item 8); benchmarks (Item 9);
-multi_stage_filter shape primitive; anomaly rule type;
+Last verified: Tier 2 + Tier 3 + Tier 4 + Tier 5 Item 19 shipped.
+Items: time-bound policies + audit-log redaction (Item 6); schema-
+drift detection (Item 7); CTE infrastructure; cohort_retention +
+funnel shape primitives; six aggregate primitives (weighted_avg,
+stddev_samp, stddev_pop, count_distinct, count_distinct_approx,
+mode -- Item 5); example_values sampling (Item 8); benchmarks
+(Item 9); multi_stage_filter shape primitive; anomaly rule type;
 query-timeout env var; break-glass role marker; alert webhooks;
 access-pattern anomaly detection; in-process scheduler
 (`gibran check --watch`); approval workflow; per-process token-bucket
-rate limiter. Multi-tenancy remains deferred as V2 architectural work.
-426 tests passing.
+rate limiter; plan cache + result cache + materialized metrics
+(Item 15); pattern-template NL layer (Tier 5 Item 19). Multi-tenancy
+and embedding-retrieval NL (Tier 5 Item 20) remain open. 456 tests
+passing.
 
 ---
 
@@ -417,7 +419,15 @@ high-leverage); (b) benchmarks become a prerequisite for any perf work;
 The user constraint changed 2026-05-13: an NL layer is in-scope IF it's
 NOT LLM-based. Hallucination is the disqualifier, not ML.
 
-19. **Pattern-template NL layer** — regex/glob patterns for ~20–30 common
+19. *Done. `gibran/nl/patterns.py` registers 6 patterns (top_n_by_metric,
+    metric_by_grain, metric_by_dim, count_of_thing, metric_filtered_by_value,
+    single_metric). Each builder validates slots against the user's
+    AllowedSchema -- typo'd or invented references return None rather
+    than guessing. `gibran ask "show me revenue by region" --role X`
+    threads the question through pattern match -> DSL intent ->
+    governance evaluate -> execute. The "for <value>" filter pattern
+    uses `example_values` to disambiguate which column to filter on,
+    so the Item 8 work and this one compose cleanly.* **Pattern-template NL layer** — regex/glob patterns for ~20–30 common
     question shapes. Deterministic; narrow coverage but covers the most-
     asked questions. Tier-5 because it lands AFTER the DSL surface is
     polished (introspection, exports, etc.) — there's no point putting NL
