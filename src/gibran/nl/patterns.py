@@ -32,6 +32,12 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from gibran.governance.types import AllowedSchema
+from gibran.nl.synonyms import (
+    BOTTOM_WORDS,
+    GRAIN_WORDS,
+    MONTH_NAMES,
+    TOP_WORDS,
+)
 
 
 class NoMatch(Exception):
@@ -45,27 +51,16 @@ class MatchResult:
     matched_text: str
 
 
+# Pre-computed regex alternations from the synonym lists. Built once at
+# import time so each pattern's @register decorator is a constant string.
+_TOP_ALT = "|".join(TOP_WORDS)
+_BOTTOM_ALT = "|".join(BOTTOM_WORDS)
+_GRAIN_ALT = "|".join(GRAIN_WORDS)
+
+
 # ---------------------------------------------------------------------------
 # Slot resolvers
 # ---------------------------------------------------------------------------
-
-_GRAIN_WORDS = {
-    "year": "year", "yearly": "year", "annual": "year", "annually": "year",
-    "quarter": "quarter", "quarterly": "quarter",
-    "month": "month", "monthly": "month",
-    "week": "week", "weekly": "week",
-    "day": "day", "daily": "day",
-}
-
-
-_MONTH_NAMES = {
-    "january": 1, "february": 2, "march": 3, "april": 4,
-    "may": 5, "june": 6, "july": 7, "august": 8,
-    "september": 9, "october": 10, "november": 11, "december": 12,
-    "jan": 1, "feb": 2, "mar": 3, "apr": 4,
-    "jun": 6, "jul": 7, "aug": 8,
-    "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
-}
 
 
 def _resolve_metric(name: str, schema: AllowedSchema) -> str | None:
@@ -170,7 +165,7 @@ def register(pattern_str: str):
 # Patterns -- ordered from most specific to most general
 # ---------------------------------------------------------------------------
 
-@register(r"^(?:top|biggest|largest|highest)\s+(\d+)\s+(.+?)\s+by\s+(.+)$")
+@register(rf"^(?:{_TOP_ALT})\s+(\d+)\s+(.+?)\s+by\s+(.+)$")
 def top_n_by_metric(m: re.Match, schema: AllowedSchema) -> dict:
     """top|biggest|largest|highest 10 <dim> by <metric> -- ORDER BY DESC LIMIT N."""
     n = int(m.group(1))
@@ -187,7 +182,7 @@ def top_n_by_metric(m: re.Match, schema: AllowedSchema) -> dict:
     }
 
 
-@register(r"^(?:bottom|smallest|lowest|fewest|least)\s+(\d+)\s+(.+?)\s+by\s+(.+)$")
+@register(rf"^(?:{_BOTTOM_ALT})\s+(\d+)\s+(.+?)\s+by\s+(.+)$")
 def bottom_n_by_metric(m: re.Match, schema: AllowedSchema) -> dict:
     """bottom|smallest|lowest|fewest|least 5 <dim> by <metric> -- ORDER BY ASC LIMIT N.
 
@@ -211,11 +206,11 @@ def bottom_n_by_metric(m: re.Match, schema: AllowedSchema) -> dict:
     }
 
 
-@register(r"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+by\s+(year|yearly|quarter|quarterly|month|monthly|week|weekly|day|daily|annual|annually)$")
+@register(rf"^(?:show me |show |what(?:'s| is) the |what(?:'s| is) )?(.+?)\s+by\s+({_GRAIN_ALT})$")
 def metric_by_grain(m: re.Match, schema: AllowedSchema) -> dict:
     """<metric> by month/week/etc -- pick a temporal dim and apply the grain."""
     metric_id = _resolve_metric(m.group(1), schema)
-    grain = _GRAIN_WORDS.get(m.group(2).lower())
+    grain = GRAIN_WORDS.get(m.group(2).lower())
     dim_id = _resolve_temporal_dim(schema)
     if not metric_id or not grain or not dim_id:
         raise NoMatch()
@@ -260,7 +255,7 @@ def metric_in_period(m: re.Match, schema: AllowedSchema) -> dict:
     year = int(m.group(3))
     month_word = m.group(2)
     if month_word is not None:
-        month = _MONTH_NAMES.get(month_word.lower())
+        month = MONTH_NAMES.get(month_word.lower())
         if month is None:
             raise NoMatch()
         start = f"{year}-{month:02d}-01"
