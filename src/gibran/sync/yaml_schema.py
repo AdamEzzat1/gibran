@@ -48,6 +48,7 @@ MetricType = Literal[
     "percentile", "rolling_window",
     "period_over_period",
     "cohort_retention", "funnel",
+    "multi_stage_filter",
     # Aggregate primitives (Tier 2 Item 5):
     "weighted_avg", "stddev_samp", "stddev_pop",
     "count_distinct", "count_distinct_approx", "mode",
@@ -109,6 +110,19 @@ class MetricConfig(_Strict):
     funnel_entity_column: str | None = None    # the entity (user_id, customer_id, ...)
     funnel_event_order_column: str | None = None  # event timestamp for sequencing
     funnel_steps: list[dict[str, str]] | None = None  # [{name, condition}, ...]
+
+    # multi_stage_filter-specific. The primitive answers questions like
+    # "top decile by 90-day spend, then churn rate". Two-stage:
+    #   1. rank each entity by `ranking_expression` (a raw SQL aggregate)
+    #   2. compute `result_expression` over the filtered subset
+    # Output is a single row: (entity_count, result_value). Pick exactly
+    # ONE of (top_n, top_percentile) -- top_percentile uses PERCENT_RANK,
+    # top_n uses ROW_NUMBER + LIMIT N.
+    msf_entity_column: str | None = None
+    msf_ranking_expression: str | None = None    # raw SQL aggregate; e.g. "SUM(amount)"
+    msf_result_expression: str | None = None     # raw SQL aggregate; e.g. "COUNT(*)"
+    top_n: int | None = None
+    top_percentile: float | None = None          # 0 < p <= 1; "top decile" = 0.1
 
     # aggregate-primitive-specific (Tier 2 Item 5):
     #   weighted_avg requires weight_column (alongside expression for the value)
@@ -240,6 +254,39 @@ class MetricConfig(_Strict):
                     f"metric {self.id!r}: funnel cannot have "
                     f"expression/numerator/denominator"
                 )
+        elif self.type == "multi_stage_filter":
+            missing = [
+                f for f in (
+                    "msf_entity_column", "msf_ranking_expression",
+                    "msf_result_expression",
+                )
+                if getattr(self, f) is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"metric {self.id!r}: multi_stage_filter requires {missing}"
+                )
+            has_n = self.top_n is not None
+            has_p = self.top_percentile is not None
+            if has_n == has_p:
+                raise ValueError(
+                    f"metric {self.id!r}: multi_stage_filter requires exactly "
+                    f"ONE of `top_n` or `top_percentile`"
+                )
+            if has_n and self.top_n <= 0:
+                raise ValueError(
+                    f"metric {self.id!r}: multi_stage_filter top_n must be > 0"
+                )
+            if has_p and not (0 < self.top_percentile <= 1):
+                raise ValueError(
+                    f"metric {self.id!r}: multi_stage_filter top_percentile "
+                    f"must be in (0, 1], got {self.top_percentile}"
+                )
+            if self.expression or self.numerator or self.denominator:
+                raise ValueError(
+                    f"metric {self.id!r}: multi_stage_filter cannot have "
+                    f"expression/numerator/denominator"
+                )
         elif self.type == "weighted_avg":
             if self.expression is None or self.weight_column is None:
                 raise ValueError(
@@ -285,6 +332,11 @@ class RoleConfig(_Strict):
     id: str
     display_name: str
     attributes: dict[str, str] = Field(default_factory=dict)
+    # Break-glass: elevated-access role whose every use produces a marked
+    # audit row (gibran_query_log.is_break_glass = TRUE). Default-deny
+    # remains the right setting for normal roles; break-glass is the
+    # explicit "I know I'm doing something high-privilege" toggle.
+    is_break_glass: bool = False
 
 
 class PolicyConfig(_Strict):
@@ -304,12 +356,16 @@ class PolicyConfig(_Strict):
 class QualityRuleConfig(_Strict):
     id: str
     source: str
-    type: Literal["not_null", "unique", "range", "custom_sql"]
+    type: Literal["not_null", "unique", "range", "custom_sql", "anomaly"]
     config: dict[str, Any]
     severity: Literal["warn", "block"]
     cost_class: Literal["cheap", "expensive"] | None = None
     staleness_seconds: int | None = None
     enabled: bool = True
+    # Optional webhook URL: POSTed a BlockingFailure JSON when this rule
+    # fails with severity='block'. NULL = no webhook (the runner will
+    # never make an outbound network call for rules without one).
+    alert_webhook: str | None = None
 
     @model_validator(mode="after")
     def _check_config_shape(self) -> "QualityRuleConfig":
@@ -336,6 +392,26 @@ class QualityRuleConfig(_Strict):
             if "sql" not in self.config:
                 raise ValueError(
                     f"quality_rule {self.id!r}: custom_sql requires config.sql"
+                )
+        elif self.type == "anomaly":
+            # Anomaly rules compute a numeric observation from `sql`, store
+            # it in gibran_quality_runs.observed_value, and flag failures
+            # when the new value falls outside +/- n_sigma * stddev of the
+            # trailing trailing_periods observations. Bootstrapping: with
+            # fewer than `min_observations` history, the rule never fails.
+            if "sql" not in self.config:
+                raise ValueError(
+                    f"quality_rule {self.id!r}: anomaly requires config.sql"
+                )
+            if "n_sigma" not in self.config or self.config["n_sigma"] <= 0:
+                raise ValueError(
+                    f"quality_rule {self.id!r}: anomaly requires "
+                    f"config.n_sigma > 0"
+                )
+            if "trailing_periods" not in self.config or self.config["trailing_periods"] < 2:
+                raise ValueError(
+                    f"quality_rule {self.id!r}: anomaly requires "
+                    f"config.trailing_periods >= 2"
                 )
         return self
 

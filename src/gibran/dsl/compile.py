@@ -193,10 +193,11 @@ def compile_intent(intent: QueryIntent, catalog: Catalog) -> CompiledQuery:
 
     metric_metas = [catalog.get_metric(m) for m in intent.metrics]
 
-    # Shape-primitives short-circuit: cohort_retention and funnel are
-    # whole-query primitives that emit a fixed column shape via CTEs.
-    # They cannot be combined with other metrics or with intent.dimensions
-    # (the dsl validator enforces those preconditions; we double-check).
+    # Shape-primitives short-circuit: cohort_retention, funnel, and
+    # multi_stage_filter are whole-query primitives that emit a fixed
+    # column shape via CTEs. They cannot be combined with other metrics
+    # or with intent.dimensions (the dsl validator enforces those
+    # preconditions; we double-check).
     for meta in metric_metas:
         if meta.metric_type == "cohort_retention":
             if len(metric_metas) != 1 or intent.dimensions:
@@ -214,6 +215,14 @@ def compile_intent(intent: QueryIntent, catalog: Catalog) -> CompiledQuery:
                     f"empty"
                 )
             return _build_funnel(meta, from_relation, intent)
+        if meta.metric_type == "multi_stage_filter":
+            if len(metric_metas) != 1 or intent.dimensions:
+                raise CompileError(
+                    f"multi_stage_filter metric {meta.metric_id!r} must be "
+                    f"the only metric in the intent and intent.dimensions "
+                    f"must be empty"
+                )
+            return _build_multi_stage_filter(meta, from_relation, intent)
     dim_metas = [
         (dim, catalog.get_dimension(dim.id)) for dim in intent.dimensions
     ]
@@ -679,3 +688,86 @@ def _build_funnel(
     )
 
     return CompiledQuery(ctes=tuple(ctes), main_sql=main_sql)
+
+
+# ---------------------------------------------------------------------------
+# multi_stage_filter
+# ---------------------------------------------------------------------------
+
+def _build_multi_stage_filter(
+    meta: _MetricMeta, from_relation: str, intent: QueryIntent
+) -> CompiledQuery:
+    """Emit a CTE-chained query for two-stage analytics:
+
+        1. Rank each entity by `ranking_expression` (a raw SQL aggregate)
+        2. Keep the top_n or top_percentile of entities
+        3. Compute `result_expression` over those entities' rows
+
+    Output is a SINGLE row: (entity_count, result_value).
+
+    The classic example: "of customers in the top decile by 90-day
+    spend, what's their churn rate?". Both ranking and result
+    expressions are raw SQL aggregates that operate against the
+    source's rows; the primitive handles the entity-level filter
+    plumbing.
+    """
+    cfg = meta.metric_config
+    if not cfg:
+        raise CompileError(
+            f"multi_stage_filter metric {meta.metric_id!r} is missing "
+            f"metric_config"
+        )
+    entity_col = qident(cfg["entity_column"])
+    ranking_expr = cfg["ranking_expression"]
+    result_expr = cfg["result_expression"]
+    top_n = cfg.get("top_n")
+    top_percentile = cfg.get("top_percentile")
+
+    if from_relation.startswith(("read_parquet(", "read_csv(")):
+        source_from = f"{from_relation} AS {qident(intent.source)}"
+    else:
+        source_from = from_relation
+
+    # Stage 1: per-entity ranking value
+    ranked_sql = (
+        f"SELECT {entity_col} AS entity, "
+        f"({ranking_expr}) AS rank_value\n"
+        f"FROM {source_from}\n"
+        f"GROUP BY {entity_col}"
+    )
+
+    # Stage 2: top-N OR top-percentile cut. PERCENT_RANK returns 0.0 for
+    # the highest-ranked row, 1.0 for the lowest -- so "top decile" is
+    # WHERE pct_rank <= 0.1. For top_n we use ROW_NUMBER instead so the
+    # cut is exactly N entities (PERCENT_RANK can tie).
+    if top_n is not None:
+        top_entities_sql = (
+            f"SELECT entity FROM ranked\n"
+            f"ORDER BY rank_value DESC\n"
+            f"LIMIT {int(top_n)}"
+        )
+    else:
+        assert top_percentile is not None
+        top_entities_sql = (
+            f"SELECT entity FROM (\n"
+            f"  SELECT entity, "
+            f"PERCENT_RANK() OVER (ORDER BY rank_value DESC) AS pct\n"
+            f"  FROM ranked\n"
+            f") sub WHERE pct <= {float(top_percentile)}"
+        )
+
+    main_sql = (
+        f"SELECT COUNT(DISTINCT te.entity) AS entity_count, "
+        f"({result_expr}) AS result_value\n"
+        f"FROM {source_from} AS src\n"
+        f"JOIN top_entities te ON src.{entity_col} = te.entity\n"
+        f"LIMIT {intent.limit}"
+    )
+
+    return CompiledQuery(
+        ctes=(
+            CTE("ranked", ranked_sql),
+            CTE("top_entities", top_entities_sql, depends_on=("ranked",)),
+        ),
+        main_sql=main_sql,
+    )

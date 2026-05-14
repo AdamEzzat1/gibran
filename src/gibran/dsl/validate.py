@@ -118,15 +118,15 @@ def validate_intent(
             f"or use a non-rolling metric."
         )
 
-    # Shape-primitives (cohort_retention, funnel) emit a whole-query shape
-    # with their own dimensions baked in. They cannot be combined with
-    # other metrics, intent.dimensions, intent.filters, intent.having, or
-    # intent.order_by -- the compiler emits the whole query, so user-
-    # supplied modifiers have nowhere to plug in.
+    # Shape-primitives (cohort_retention, funnel, multi_stage_filter) emit
+    # a whole-query shape with their own dimensions baked in. They cannot
+    # be combined with other metrics, intent.dimensions, intent.filters,
+    # intent.having, or intent.order_by -- the compiler emits the whole
+    # query, so user-supplied modifiers have nowhere to plug in.
     shape_metrics = [
         m for m in schema.metrics
         if m.metric_id in intent_metric_set
-        and m.metric_type in ("cohort_retention", "funnel")
+        and m.metric_type in ("cohort_retention", "funnel", "multi_stage_filter")
     ]
     if shape_metrics:
         sm = shape_metrics[0]

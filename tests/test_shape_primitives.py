@@ -69,7 +69,7 @@ def _populated_db() -> duckdb.DuckDBPyConnection:
 def _admin(con: duckdb.DuckDBPyConnection) -> tuple[IdentityContext, DefaultGovernance]:
     """Provision an allow-everything admin role for tests that need
     direct access to PII (`customer_email` is the entity column)."""
-    con.execute("INSERT INTO gibran_roles VALUES ('admin', 'Admin')")
+    con.execute("INSERT INTO gibran_roles (role_id, display_name) VALUES ('admin', 'Admin')")
     con.execute(
         "INSERT INTO gibran_policies "
         "(policy_id, role_id, source_id, default_column_mode) "

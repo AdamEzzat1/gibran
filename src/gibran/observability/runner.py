@@ -51,20 +51,25 @@ def run_checks(
 
     Records each run via `observability.record_run`, then triggers
     `observability.refresh_health(source_id)` so the cache reflects the
-    new latest-run-per-rule state."""
+    new latest-run-per-rule state. After all runs land, fires the
+    configured `alert_webhook` for any rule that failed at
+    severity='block' -- one POST per failing rule, best-effort.
+    """
     results: list[RuleResult] = []
 
-    # Quality rules
+    # Quality rules. We need alert_webhook per rule for the outbound
+    # alerting step below; select it alongside the evaluation inputs.
     quality_rows = con.execute(
-        "SELECT rule_id, rule_type, rule_config, severity "
+        "SELECT rule_id, rule_type, rule_config, severity, alert_webhook "
         "FROM gibran_quality_rules WHERE source_id = ? AND enabled = TRUE",
         [source_id],
     ).fetchall()
-    for rule_id, rule_type, rule_config_json, severity in quality_rows:
+    webhooks: list[tuple[str, str, str, dict]] = []
+    for rule_id, rule_type, rule_config_json, severity, webhook in quality_rows:
         rule_config = json.loads(rule_config_json)
         try:
             passed, observed = _evaluate_quality_rule(
-                con, source_id, rule_type, rule_config
+                con, source_id, rule_type, rule_config, rule_id=rule_id,
             )
             err = None
         except Exception as e:
@@ -77,6 +82,8 @@ def run_checks(
             passed=passed, severity=severity, observed_value=observed,
             error=err,
         ))
+        if not passed and severity == "block" and webhook:
+            webhooks.append((rule_id, "quality", webhook, observed))
 
     # Freshness rules
     freshness_rows = con.execute(
@@ -104,6 +111,13 @@ def run_checks(
     # Refresh the source health cache to reflect the runs we just recorded.
     observability.refresh_health(source_id)
 
+    # Fire any configured webhooks for block-severity failures. Done AFTER
+    # record_run so an alerting outage doesn't lose the run record. Each
+    # POST is best-effort -- failures are caught and silently dropped so
+    # one bad URL doesn't sink the whole check pass.
+    for rule_id, rule_kind, url, observed in webhooks:
+        _fire_webhook(url, rule_id, rule_kind, source_id, observed)
+
     total = len(results)
     failed = sum(1 for r in results if not r.passed and r.error is None)
     errored = sum(1 for r in results if r.error is not None)
@@ -112,6 +126,35 @@ def run_checks(
         source_id=source_id, total=total, passed=passed_count,
         failed=failed, errored=errored, results=tuple(results),
     )
+
+
+def _fire_webhook(
+    url: str, rule_id: str, rule_kind: str, source_id: str,
+    observed: dict[str, Any],
+) -> None:
+    """POST a JSON payload to `url`. Best-effort -- network failures
+    are swallowed. Synchronous; intentionally not threaded so a runner
+    completes deterministically in tests and CI."""
+    import json as _json
+    import urllib.request
+
+    payload = {
+        "rule_id": rule_id,
+        "rule_kind": rule_kind,
+        "source_id": source_id,
+        "observed": observed,
+        "severity": "block",
+    }
+    body = _json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=5).read(0)
+    except Exception:
+        pass  # alerting failure must not affect run-record correctness
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +166,8 @@ def _evaluate_quality_rule(
     source_id: str,
     rule_type: str,
     rule_config: dict[str, Any],
+    *,
+    rule_id: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     relation = from_clause_for_source(con, source_id)
 
@@ -174,6 +219,59 @@ def _evaluate_quality_rule(
                 "rows_returned": len(result),
             }
         return bool(result[0][0]), {"result": str(result[0][0])}
+
+    if rule_type == "anomaly":
+        # Compute the current numeric observation, then compare to the
+        # trailing N observations of the same rule. Bootstrap behavior:
+        # with fewer than `trailing_periods` history rows, the rule
+        # never fails -- we don't have enough data to be confident.
+        if rule_id is None:
+            raise ValueError(
+                "anomaly rules require rule_id to look up history "
+                "(callers via run_checks pass it automatically)"
+            )
+        sql = rule_config["sql"]
+        n_sigma = float(rule_config["n_sigma"])
+        trailing = int(rule_config["trailing_periods"])
+        row = con.execute(sql).fetchone()
+        if row is None or len(row) != 1:
+            return False, {
+                "error": "anomaly sql must return one row, one column",
+            }
+        current = row[0]
+        if current is None:
+            return False, {"error": "anomaly sql returned NULL"}
+        current_f = float(current)
+        history = con.execute(
+            "SELECT CAST(observed_value->>'value' AS DOUBLE) "
+            "FROM gibran_quality_runs "
+            "WHERE rule_id = ? AND rule_kind = 'quality' "
+            "AND observed_value IS NOT NULL "
+            "AND CAST(observed_value->>'value' AS DOUBLE) IS NOT NULL "
+            "ORDER BY ran_at DESC LIMIT ?",
+            [rule_id, trailing],
+        ).fetchall()
+        values = [float(r[0]) for r in history if r[0] is not None]
+        observed: dict[str, Any] = {
+            "value": current_f,
+            "n_sigma": n_sigma,
+            "trailing_periods": trailing,
+            "history_count": len(values),
+        }
+        if len(values) < 2:
+            observed["bootstrapping"] = True
+            return True, observed
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+        stddev = variance ** 0.5
+        observed["mean"] = mean
+        observed["stddev"] = stddev
+        if stddev == 0:
+            observed["constant_history"] = True
+            return current_f == mean, observed
+        z = abs(current_f - mean) / stddev
+        observed["z_score"] = z
+        return z <= n_sigma, observed
 
     raise ValueError(f"unknown quality rule_type: {rule_type!r}")
 

@@ -37,9 +37,11 @@ class DefaultGovernance:
         self,
         con: duckdb.DuckDBPyConnection,
         observability: ObservabilityAPI | None = None,
+        rate_limiter=None,  # RateLimiter | None; typed-loose to avoid circular import
     ) -> None:
         self.con = con
         self.observability = observability
+        self.rate_limiter = rate_limiter
 
     # ------------------------------------------------------------------
     # preview_schema
@@ -110,6 +112,19 @@ class DefaultGovernance:
                 "cross-source evaluation deferred to V2 (single-source only in V1)"
             )
         [source_id] = source_ids
+
+        # Rate-limit check runs BEFORE policy lookup so an attacker
+        # hammering with bogus roles still consumes a token. This is the
+        # only place where a deny can happen without the source/policy
+        # being resolved -- the deny_detail records the (user, role) key.
+        if self.rate_limiter is not None and not self.rate_limiter.acquire(
+            identity.user_id, identity.role_id,
+        ):
+            return _deny(
+                DenyReason.RATE_LIMITED,
+                f"user={identity.user_id} role={identity.role_id}",
+                column_allowlist=frozenset(),
+            )
 
         policy_row = self._fetch_policy(identity.role_id, source_id)
         if policy_row is None:

@@ -101,6 +101,16 @@ def run_sql_query(
         else sql
     )
 
+    # Optional per-query timeout via env var. DuckDB's `statement_timeout`
+    # is a session setting; we set it before execute and tolerate the case
+    # where it's not supported on older DuckDB builds.
+    timeout_ms = _query_timeout_ms()
+    if timeout_ms is not None:
+        try:
+            con.execute(f"SET statement_timeout = '{timeout_ms}ms'")
+        except Exception:
+            pass  # older DuckDB; honor on a best-effort basis
+
     try:
         cur = con.execute(rewritten)
         rows = cur.fetchall()
@@ -433,14 +443,45 @@ def _write_query_log(
     generated_sql, nl_prompt = redact_audit_payload(
         con, source_id, generated_sql, nl_prompt
     )
+    # Mark the audit row when the identity's role is a break-glass role.
+    # This makes elevated-access usage searchable in the audit log
+    # without changing the deny_reason semantics.
+    is_break_glass = _is_break_glass_role(con, identity.role_id)
     con.execute(
         "INSERT INTO gibran_query_log "
         "(query_id, user_id, role_id, nl_prompt, generated_sql, "
-        "status, deny_reason, row_count, duration_ms) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "status, deny_reason, row_count, duration_ms, is_break_glass) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             query_id, identity.user_id, identity.role_id,
             nl_prompt, generated_sql, status, deny_reason,
-            row_count, duration_ms,
+            row_count, duration_ms, is_break_glass,
         ],
     )
+
+
+def _is_break_glass_role(
+    con: duckdb.DuckDBPyConnection, role_id: str
+) -> bool:
+    row = con.execute(
+        "SELECT is_break_glass FROM gibran_roles WHERE role_id = ?",
+        [role_id],
+    ).fetchone()
+    return bool(row[0]) if row is not None else False
+
+
+def _query_timeout_ms() -> int | None:
+    """Return the per-query timeout in milliseconds from the
+    GIBRAN_QUERY_TIMEOUT_MS env var, or None if unset / invalid. The
+    env-var knob is intentional: query timeouts are a deployment
+    concern (an analyst's 60s budget might be unacceptable for a
+    dashboard's 2s SLO), not a per-query config."""
+    import os
+    raw = os.environ.get("GIBRAN_QUERY_TIMEOUT_MS")
+    if not raw:
+        return None
+    try:
+        v = int(raw)
+        return v if v > 0 else None
+    except ValueError:
+        return None

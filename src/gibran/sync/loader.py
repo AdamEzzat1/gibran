@@ -159,6 +159,15 @@ def _validate_cross_entity(cfg: GibranConfig) -> dict[str, frozenset[str]]:
                         f"metric {m.id!r}: {col_field} {col_value!r} not "
                         f"defined on source {m.source!r}"
                     )
+        elif m.type == "multi_stage_filter":
+            cols = columns_by_source.get(m.source, frozenset())
+            assert m.msf_entity_column is not None
+            if m.msf_entity_column not in cols:
+                raise ConfigValidationError(
+                    f"metric {m.id!r}: msf_entity_column "
+                    f"{m.msf_entity_column!r} not defined on source "
+                    f"{m.source!r}"
+                )
         elif m.type == "weighted_avg":
             if m.weight_column is not None:
                 cols = columns_by_source.get(m.source, frozenset())

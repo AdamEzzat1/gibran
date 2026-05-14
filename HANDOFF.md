@@ -6,15 +6,18 @@ with `STATUS.md` (current-state snapshot) but is forward-looking: what to
 build next, why, and in what order.
 
 Commit checkpoint: `c77f911` — Initial commit: Gibran V1.
-Last verified: Tier 2 + Tier 3 (cohort_retention / funnel) substantially
-complete. Items shipped: time-bound policies + audit-log redaction
-(Item 6); schema-drift detection in `gibran sync` (Item 7); CTE
-infrastructure with CompiledQuery / CTE dataclasses and CTE-aware
-column walker; cohort_retention + funnel shape primitives (Tier 3);
-six aggregate primitives -- weighted_avg, stddev_samp, stddev_pop,
-count_distinct, count_distinct_approx, mode (Item 5); example_values
-sampling for low-cardinality public columns (Item 8); performance
-baselines in `tests/benchmarks/bench.py` (Item 9). 409 tests passing.
+Last verified: Tier 2 + Tier 3 + most of Tier 4 shipped. Items: time-
+bound policies + audit-log redaction (Item 6); schema-drift detection
+(Item 7); CTE infrastructure; cohort_retention + funnel shape
+primitives; six aggregate primitives (weighted_avg, stddev_samp,
+stddev_pop, count_distinct, count_distinct_approx, mode -- Item 5);
+example_values sampling (Item 8); benchmarks (Item 9);
+multi_stage_filter shape primitive; anomaly rule type;
+query-timeout env var; break-glass role marker; alert webhooks;
+access-pattern anomaly detection; in-process scheduler
+(`gibran check --watch`); approval workflow; per-process token-bucket
+rate limiter. Multi-tenancy remains deferred as V2 architectural work.
+426 tests passing.
 
 ---
 
@@ -388,7 +391,18 @@ high-leverage); (b) benchmarks become a prerequisite for any perf work;
 
 ### Tier 4 — strategic, each its own design pass
 
-14. **Anomaly-detection rule type + `gibran check` scheduler + alerting
+14. *Mostly done. Anomaly-detection rule type, `gibran check --watch`
+    scheduler, and webhook alerting all shipped. Access-pattern anomaly
+    detection lives at `gibran/observability/access_anomaly.py` and is
+    surfaced via `gibran detect-access-anomalies`. Approval workflow at
+    `gibran/sync/approval.py` (queue: gibran_pending_changes; approve via
+    `gibran approve <id> --by <name>`). Break-glass role marker
+    (is_break_glass flag mirrored onto query-log rows). Per-process
+    token-bucket rate limiter at `gibran/governance/rate_limit.py` --
+    V2 caveat: in a multi-process deployment each process has its own
+    bucket so the limit is per-process, not global; cross-process needs
+    Redis-or-equivalent. Multi-tenancy primitives remain V2 work (adding
+    tenant_id everywhere is a migration cascade.* **Anomaly-detection rule type + `gibran check` scheduler + alerting
     integration** (DQ A-move).
 15. **DSL result caching + compiled-DSL plan cache + materialized metrics**
     (Perf — after benchmarks).

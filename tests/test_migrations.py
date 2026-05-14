@@ -11,7 +11,7 @@ MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 def test_migrations_apply_clean() -> None:
     con = duckdb.connect(":memory:")
     applied = apply_all(con, MIGRATIONS_DIR)
-    assert applied == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 
 def test_metric_config_column_exists() -> None:

@@ -65,7 +65,7 @@ def _admin_identity() -> IdentityContext:
 def _admin_policy(con: duckdb.DuckDBPyConnection) -> None:
     # Allow-everything policy for the admin role so raw-SQL paths can
     # touch customer_email without triggering COLUMN_DENIED.
-    con.execute("INSERT INTO gibran_roles VALUES ('admin', 'Admin')")
+    con.execute("INSERT INTO gibran_roles (role_id, display_name) VALUES ('admin', 'Admin')")
     con.execute(
         "INSERT INTO gibran_policies (policy_id, role_id, source_id, default_column_mode) "
         "VALUES ('admin_orders', 'admin', 'orders', 'allow')"

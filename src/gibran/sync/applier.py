@@ -213,6 +213,14 @@ def _render_metric_config(m: MetricConfig) -> str | None:
             "event_order_column": m.funnel_event_order_column,
             "steps": m.funnel_steps,
         })
+    if m.type == "multi_stage_filter":
+        return json.dumps({
+            "entity_column": m.msf_entity_column,
+            "ranking_expression": m.msf_ranking_expression,
+            "result_expression": m.msf_result_expression,
+            "top_n": m.top_n,
+            "top_percentile": m.top_percentile,
+        })
     return None
 
 
@@ -245,6 +253,9 @@ def _render_expression(m: MetricConfig) -> str:
     if m.type == "funnel":
         # Same: CTE chain built by the compiler from metric_config.
         return f"funnel[{m.funnel_entity_column}/{len(m.funnel_steps or [])} steps]"
+    if m.type == "multi_stage_filter":
+        gate = f"top_n={m.top_n}" if m.top_n is not None else f"top_p={m.top_percentile}"
+        return f"multi_stage_filter[{m.msf_entity_column}/{gate}]"
     if m.type == "weighted_avg":
         # SUM(value * weight) / NULLIF(SUM(weight), 0). Single-pass aggregate.
         assert m.expression is not None and m.weight_column is not None
@@ -312,17 +323,20 @@ def _replace_metric_dependencies(
 
 def _upsert_role(con: duckdb.DuckDBPyConnection, r: RoleConfig) -> None:
     existing = con.execute(
-        "SELECT display_name FROM gibran_roles WHERE role_id = ?", [r.id]
+        "SELECT display_name, is_break_glass FROM gibran_roles WHERE role_id = ?",
+        [r.id],
     ).fetchone()
     if existing is None:
         con.execute(
-            "INSERT INTO gibran_roles (role_id, display_name) VALUES (?, ?)",
-            [r.id, r.display_name],
+            "INSERT INTO gibran_roles "
+            "(role_id, display_name, is_break_glass) VALUES (?, ?, ?)",
+            [r.id, r.display_name, r.is_break_glass],
         )
-    elif existing != (r.display_name,):
+    elif existing != (r.display_name, r.is_break_glass):
         con.execute(
-            "UPDATE gibran_roles SET display_name = ? WHERE role_id = ?",
-            [r.display_name, r.id],
+            "UPDATE gibran_roles SET display_name = ?, is_break_glass = ? "
+            "WHERE role_id = ?",
+            [r.display_name, r.is_break_glass, r.id],
         )
     con.execute("DELETE FROM gibran_role_attributes WHERE role_id = ?", [r.id])
     for k, v in r.attributes.items():
@@ -385,8 +399,8 @@ def _replace_all_quality_rules(
         con.execute(
             "INSERT INTO gibran_quality_rules "
             "(rule_id, source_id, rule_type, rule_config, cost_class, severity, "
-            "staleness_seconds, enabled) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "staleness_seconds, enabled, alert_webhook) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 q.id,
                 q.source,
@@ -396,6 +410,7 @@ def _replace_all_quality_rules(
                 q.severity,
                 q.staleness_seconds,
                 q.enabled,
+                q.alert_webhook,
             ],
         )
 

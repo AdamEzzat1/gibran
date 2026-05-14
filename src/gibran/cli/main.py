@@ -207,6 +207,14 @@ def check(
         None, "--source", "-s",
         help="Run rules for a specific source (default: all sources)",
     ),
+    watch: bool = typer.Option(
+        False, "--watch",
+        help="Run repeatedly with --interval seconds between passes",
+    ),
+    interval: int = typer.Option(
+        300, "--interval",
+        help="Seconds between passes in --watch mode (default: 300)",
+    ),
 ) -> None:
     """Run all enabled quality + freshness rules and refresh the source-health cache.
 
@@ -214,11 +222,15 @@ def check(
     gibran_quality_runs, and refreshes gibran_source_health. Designed to be run
     on a schedule (cron / CI) -- queries consult the cache on the hot path.
 
-    V1 assumption: source_id is also the DuckDB relation name (table/view).
-    For parquet/csv sources, register them as views before running.
+    --watch turns the command into an in-process scheduler that loops on
+    --interval seconds. V1 limitation: single-process; for production use
+    a real scheduler (cron, systemd timer, k8s CronJob) -- the --watch
+    mode is meant for local dev and small deployments where running a
+    long-lived `gibran check --watch` is reasonable.
 
-    Exit codes: 0 if all rules passed; 1 if any rule failed; 2 if any
-    rule errored during evaluation."""
+    Exit codes (non-watch mode only): 0 if all rules passed; 1 if any
+    rule failed; 2 if any rule errored during evaluation."""
+    import time
     from gibran.observability.default import DefaultObservability
     from gibran.observability.runner import run_checks
 
@@ -228,47 +240,140 @@ def check(
         typer.echo(f"error: no DB at {db}; run `gibran init` first", err=True)
         raise typer.Exit(code=1)
 
-    con = duckdb.connect(str(db))
-    try:
-        if source is None:
-            sources = [
-                r[0]
-                for r in con.execute("SELECT source_id FROM gibran_sources").fetchall()
-            ]
-        else:
-            sources = [source]
+    def _one_pass() -> tuple[int, int]:
+        con = duckdb.connect(str(db))
+        try:
+            if source is None:
+                sources = [
+                    r[0]
+                    for r in con.execute("SELECT source_id FROM gibran_sources").fetchall()
+                ]
+            else:
+                sources = [source]
 
-        obs = DefaultObservability(con)
-        total_failed = 0
-        total_errored = 0
+            obs = DefaultObservability(con)
+            total_failed = 0
+            total_errored = 0
 
-        for src in sources:
-            typer.echo(f"\n=== {src} ===")
-            result = run_checks(con, src, obs)
-            for r in result.results:
-                if r.error is not None:
-                    status_text = "ERROR"
-                elif r.passed:
-                    status_text = "PASS"
-                else:
-                    status_text = "FAIL"
+            for src in sources:
+                typer.echo(f"\n=== {src} ===")
+                result = run_checks(con, src, obs)
+                for r in result.results:
+                    if r.error is not None:
+                        status_text = "ERROR"
+                    elif r.passed:
+                        status_text = "PASS"
+                    else:
+                        status_text = "FAIL"
+                    typer.echo(
+                        f"  {r.rule_id:35s} {status_text:6s} "
+                        f"[{r.rule_kind}/{r.severity}] {r.observed_value}"
+                    )
                 typer.echo(
-                    f"  {r.rule_id:35s} {status_text:6s} "
-                    f"[{r.rule_kind}/{r.severity}] {r.observed_value}"
+                    f"  -- total={result.total} passed={result.passed} "
+                    f"failed={result.failed} errored={result.errored}"
                 )
-            typer.echo(
-                f"  -- total={result.total} passed={result.passed} "
-                f"failed={result.failed} errored={result.errored}"
-            )
-            total_failed += result.failed
-            total_errored += result.errored
-    finally:
-        con.close()
+                total_failed += result.failed
+                total_errored += result.errored
+            return total_failed, total_errored
+        finally:
+            con.close()
 
+    if watch:
+        # In-process scheduler: re-run every `interval` seconds.
+        # Exits on Ctrl-C only. No retry/backoff -- this is for dev /
+        # small deployments, not production reliability.
+        while True:
+            try:
+                _one_pass()
+            except Exception as e:
+                typer.echo(f"check pass errored: {e}", err=True)
+            typer.echo(f"\n[sleeping {interval}s; Ctrl-C to stop]\n")
+            try:
+                time.sleep(interval)
+            except KeyboardInterrupt:
+                return
+        return
+
+    total_failed, total_errored = _one_pass()
     if total_errored:
         raise typer.Exit(code=2)
     if total_failed:
         raise typer.Exit(code=1)
+
+
+@app.command("detect-access-anomalies")
+def detect_access_anomalies_cmd(
+    trailing_days: int = typer.Option(
+        14, "--trailing-days",
+        help="Days of history to compare today against (default: 14)",
+    ),
+    n_sigma: float = typer.Option(
+        3.0, "--n-sigma",
+        help="Z-score threshold for flagging (default: 3.0)",
+    ),
+) -> None:
+    """Scan gibran_query_log for users whose today's query volume is
+    > n_sigma above their trailing-day mean. Prints one line per anomaly.
+
+    Exit code 0 with no anomalies; 1 if anomalies found (useful for
+    CI / alerting integrations)."""
+    from gibran.observability.access_anomaly import detect_access_anomalies
+
+    root = _project_root()
+    db = _db_path(root)
+    if not db.exists():
+        typer.echo(f"error: no DB at {db}", err=True)
+        raise typer.Exit(code=1)
+    con = duckdb.connect(str(db))
+    try:
+        anomalies = detect_access_anomalies(
+            con, trailing_days=trailing_days, n_sigma=n_sigma,
+        )
+    finally:
+        con.close()
+    if not anomalies:
+        typer.echo("no access-pattern anomalies detected")
+        return
+    for a in anomalies:
+        typer.echo(
+            f"user={a.user_id} role={a.role_id} today={a.today_count} "
+            f"mean={a.mean:.1f} stddev={a.stddev:.1f} z={a.z_score:.2f} "
+            f"trailing_days={a.trailing_days}"
+        )
+    raise typer.Exit(code=1)
+
+
+@app.command()
+def approve(
+    change_id: str = typer.Argument(...),
+    approved_by: str = typer.Option(
+        ..., "--by",
+        help="Identifier of the approver (recorded in the audit row)",
+    ),
+) -> None:
+    """Approve a pending change submitted via the approval workflow.
+
+    With no change_id, lists outstanding pending changes."""
+    from gibran.sync.approval import approve as approve_change
+
+    root = _project_root()
+    db = _db_path(root)
+    if not db.exists():
+        typer.echo(f"error: no DB at {db}", err=True)
+        raise typer.Exit(code=1)
+    con = duckdb.connect(str(db))
+    try:
+        change = approve_change(con, change_id, approved_by=approved_by)
+    except ValueError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=1)
+    finally:
+        con.close()
+    typer.echo(
+        f"approved {change.change_id} ({change.change_type}) by {approved_by}"
+    )
+    typer.echo(f"payload: {change.payload}")
 
 
 @app.command()

@@ -38,6 +38,7 @@ class DenyReason(str, Enum):
     AST_INVALID       = "policy:ast_invalid"
     ATTRIBUTE_MISSING = "policy:attribute_unresolved"
     POLICY_EXPIRED    = "policy:expired"
+    RATE_LIMITED      = "policy:rate_limited"
     QUALITY_BLOCK     = "quality:rule_failed"
     FRESHNESS_BLOCK   = "freshness:rule_failed"
 
