@@ -213,7 +213,7 @@ class TestCompiler:
             metrics=["revenue_mom"],
             dimensions=[{"id": "orders.order_date", "grain": "month"}],
         )
-        sql = compile_intent(intent, Catalog(con))
+        sql = compile_intent(intent, Catalog(con)).render()
         assert "LAG(" in sql
         # base metric is gross_revenue -> SUM(amount) FILTER (WHERE status='paid')
         assert "SUM(amount)" in sql
@@ -240,7 +240,7 @@ class TestCompiler:
             metrics=["revenue_mom"],
             dimensions=[{"id": "orders.order_date", "grain": "month"}],
         )
-        sql = compile_intent(intent, Catalog(con))
+        sql = compile_intent(intent, Catalog(con)).render()
         assert "LAG(" in sql
         assert "NULLIF(" in sql
 
@@ -261,7 +261,7 @@ class TestCompiler:
             metrics=["revenue_mom"],
             dimensions=[{"id": "orders.order_date", "grain": "month"}],
         )
-        sql = compile_intent(intent, Catalog(con))
+        sql = compile_intent(intent, Catalog(con)).render()
         # pct_change = (base - lag) / NULLIF(lag, 0)
         assert "LAG(" in sql
         assert "NULLIF(" in sql

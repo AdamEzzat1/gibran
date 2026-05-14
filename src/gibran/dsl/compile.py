@@ -36,6 +36,64 @@ class CompileError(ValueError):
     pass
 
 
+# ---------------------------------------------------------------------------
+# Compiled-query shape
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CTE:
+    """A single common-table-expression in a compiled query.
+
+    `depends_on` lists the names of OTHER CTEs this one references.
+    The compiler is expected to provide CTEs in dependency-resolved
+    order (parent before child) -- the renderer does not topologically
+    re-sort. This keeps the contract obvious: the list IS the WITH
+    clause's emission order.
+    """
+    name: str
+    sql: str
+    depends_on: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CompiledQuery:
+    """Output of `compile_intent`.
+
+    A compiled query has a (possibly empty) sequence of CTEs and a
+    main SELECT that may reference those CTE names. For V1 primitives
+    that fit in a single SELECT (count / sum / ratio / percentile /
+    rolling_window / period_over_period / expression), `ctes` is empty
+    and `main_sql` carries the whole query. New CTE-based primitives
+    (cohort_retention, funnel) populate `ctes`.
+
+    Use `.render()` to assemble the final `WITH ... SELECT ...` string
+    suitable for handing to the execution layer.
+    """
+    ctes: tuple[CTE, ...]
+    main_sql: str
+
+    def render(self) -> str:
+        """Assemble `WITH cte1 AS (...), cte2 AS (...) <main_sql>`.
+
+        With no CTEs the result is just `main_sql` -- the single-SELECT
+        primitives compile to the same SQL string they always did, so
+        nothing in execution / governance / audit-log shape changes.
+        """
+        if not self.ctes:
+            return self.main_sql
+        cte_defs = ",\n".join(
+            f"{cte.name} AS (\n  {_indent_body(cte.sql)}\n)"
+            for cte in self.ctes
+        )
+        return f"WITH {cte_defs}\n{self.main_sql}"
+
+
+def _indent_body(sql: str) -> str:
+    """Indent each line by 2 spaces so the CTE body reads cleanly inside
+    its parentheses. The first line is already indented by the caller."""
+    return sql.replace("\n", "\n  ")
+
+
 _TEMPLATE_REF_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 _RATIO_TEMPLATE_RE = re.compile(r"^\{([a-zA-Z_][a-zA-Z0-9_]*)\}/\{([a-zA-Z_][a-zA-Z0-9_]*)\}$")
 
@@ -115,8 +173,13 @@ _HAVING_BINOPS = {
 }
 
 
-def compile_intent(intent: QueryIntent, catalog: Catalog) -> str:
-    """Compile a validated intent to a SQL string.
+def compile_intent(intent: QueryIntent, catalog: Catalog) -> CompiledQuery:
+    """Compile a validated intent to a CompiledQuery.
+
+    For V1's single-SELECT primitives the returned CompiledQuery has
+    empty `ctes` and `main_sql` holds the entire query. Future
+    CTE-based primitives (cohort_retention, funnel) will populate
+    `ctes`. Callers that need a flat SQL string call `.render()`.
 
     Pre-conditions (caller MUST have run):
       1. QueryIntent.model_validate succeeded (Pydantic structural check)
@@ -178,7 +241,7 @@ def compile_intent(intent: QueryIntent, catalog: Catalog) -> str:
     )
     limit_clause = f"\nLIMIT {intent.limit}"
 
-    return (
+    main_sql = (
         select_clause
         + "\n" + from_clause
         + where_clause
@@ -187,6 +250,9 @@ def compile_intent(intent: QueryIntent, catalog: Catalog) -> str:
         + order_by_clause
         + limit_clause
     )
+    # V1 primitives are all single-SELECT shapes; no CTEs to emit.
+    # cohort_retention / funnel (Tier 3) will populate the ctes tuple.
+    return CompiledQuery(ctes=(), main_sql=main_sql)
 
 
 # ---------------------------------------------------------------------------

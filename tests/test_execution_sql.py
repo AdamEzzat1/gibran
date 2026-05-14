@@ -99,8 +99,11 @@ class TestParseForGovernance:
         with pytest.raises(UnsupportedQueryError, match="SELECT \\*"):
             _parse_for_governance("SELECT * FROM orders")
 
-    def test_join_rejected(self) -> None:
-        with pytest.raises(UnsupportedQueryError, match="join"):
+    def test_join_across_two_sources_rejected(self) -> None:
+        # Joins are allowed in general (CTE-based primitives self-join the
+        # same source), but a join that crosses two DISTINCT real sources
+        # is still rejected by the single-source check.
+        with pytest.raises(UnsupportedQueryError, match="exactly one source"):
             _parse_for_governance(
                 "SELECT a.x FROM a JOIN b ON a.id = b.id"
             )
@@ -111,11 +114,14 @@ class TestParseForGovernance:
                 "SELECT amount FROM orders WHERE order_id IN (SELECT id FROM other)"
             )
 
-    def test_cte_rejected(self) -> None:
-        with pytest.raises(UnsupportedQueryError, match="CTE"):
-            _parse_for_governance(
-                "WITH a AS (SELECT amount FROM orders) SELECT amount FROM a"
-            )
+    def test_cte_accepted_in_v1(self) -> None:
+        # CTEs are supported as of Tier 3 (cohort_retention, funnel land
+        # on this infrastructure). Per-CTE coverage in test_cte_infra.py.
+        source, cols = _parse_for_governance(
+            "WITH a AS (SELECT amount FROM orders) SELECT amount FROM a"
+        )
+        assert source == "orders"
+        assert "amount" in cols
 
     def test_dml_rejected(self) -> None:
         with pytest.raises(UnsupportedQueryError, match="only SELECT"):

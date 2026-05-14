@@ -699,7 +699,7 @@ def explain(
             raise typer.Exit(code=3)
 
         try:
-            sql = compile_intent(intent, Catalog(con))
+            sql = compile_intent(intent, Catalog(con)).render()
         except CompileError as e:
             typer.echo(f"ERROR: compile_failed: {e}", err=True)
             raise typer.Exit(code=3)

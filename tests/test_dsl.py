@@ -213,7 +213,7 @@ class TestCompileIntent:
             "source": "orders", "metrics": ["gross_revenue"],
             "filters": [{"op": "gte", "column": "order_date", "value": "2025-01-01"}],
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         # The metric's filter lives INSIDE the aggregate via FILTER (WHERE...)
         assert "SUM(amount) FILTER (WHERE status = 'paid')" in sql
         # The user's DSL filter lives in the query's WHERE clause
@@ -228,7 +228,7 @@ class TestCompileIntent:
             "source": "orders", "metrics": ["gross_revenue"],
             "dimensions": [{"id": "orders.order_date", "grain": "month"}],
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         assert "DATE_TRUNC('month', \"order_date\")" in sql
         assert "GROUP BY 1" in sql
 
@@ -238,7 +238,7 @@ class TestCompileIntent:
         intent = QueryIntent.model_validate({
             "source": "orders", "metrics": ["avg_order_value"]
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         # The literal template must NOT appear (it was a placeholder)
         assert "{gross_revenue}" not in sql
         assert "{order_count}" not in sql
@@ -257,7 +257,7 @@ class TestCompileIntent:
         intent = QueryIntent.model_validate({
             "source": "orders", "metrics": ["avg_order_value"]
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         # Strip the LIMIT to keep aggregation semantics; execute directly
         result = con.execute(sql).fetchone()
         # gross_revenue (SUM amount FILTER paid) / order_count (COUNT *) over all rows:
@@ -273,7 +273,7 @@ class TestCompileIntent:
             "source": "orders", "metrics": ["gross_revenue"],
             "order_by": [{"key": "gross_revenue", "direction": "desc"}],
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         assert 'ORDER BY "gross_revenue" DESC' in sql
 
     def test_unknown_source_raises_compile_error(self) -> None:
@@ -427,7 +427,7 @@ class TestFilterAggregateRendering:
         intent = QueryIntent.model_validate({
             "source": "orders", "metrics": ["gross_revenue"]
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         assert "SUM(amount) FILTER (WHERE status = 'paid')" in sql
         # No WHERE clause should be present (no DSL filters, metric filter is FILTER'd)
         assert "\nWHERE " not in sql
@@ -438,7 +438,7 @@ class TestFilterAggregateRendering:
         intent = QueryIntent.model_validate({
             "source": "orders", "metrics": ["order_count"]
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         assert 'COUNT(*) AS "order_count"' in sql
         # order_count has no filter -> no FILTER clause attached
         assert "FILTER (WHERE" not in sql
@@ -452,7 +452,7 @@ class TestFilterAggregateRendering:
         intent = QueryIntent.model_validate({
             "source": "orders", "metrics": ["order_count", "gross_revenue"],
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         result = con.execute(sql).fetchone()
         # order_count = 4 (all rows), gross_revenue = 100+200+300 = 600 (paid only)
         assert result[0] == 4
@@ -470,7 +470,7 @@ class TestExpressionMetricTemplate:
         intent = QueryIntent.model_validate({
             "source": "orders", "metrics": ["revenue_per_paid_order"]
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         assert "{gross_revenue}" not in sql
         assert "{order_count}" not in sql
         assert "SUM(amount)" in sql
@@ -483,7 +483,7 @@ class TestExpressionMetricTemplate:
         intent = QueryIntent.model_validate({
             "source": "orders", "metrics": ["revenue_per_paid_order"]
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         result = con.execute(sql).fetchone()
         # Same math as avg_order_value over all rows: 600 / 4 = 150
         assert float(result[0]) == 150.0
@@ -559,7 +559,7 @@ class TestHavingCompilation:
             "dimensions": ["orders.region"],
             "having": [{"op": "gt", "metric": "gross_revenue", "value": 150}],
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         # HAVING clause references the metric alias
         assert 'HAVING ("gross_revenue" > 150)' in sql
         # And appears after GROUP BY in the SQL
@@ -574,7 +574,7 @@ class TestHavingCompilation:
             "dimensions": ["orders.region"],
             "having": [{"op": "in", "metric": "order_count", "value": [1, 2]}],
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         assert '"order_count" IN (1, 2)' in sql
 
     def test_having_executes_against_duckdb(self) -> None:
@@ -589,7 +589,7 @@ class TestHavingCompilation:
             "having": [{"op": "gt", "metric": "gross_revenue", "value": 150}],
             "order_by": [{"key": "orders.region"}],
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         rows = con.execute(sql).fetchall()
         # paid gross revenue by region:
         #   west: 100 (o1)
@@ -657,7 +657,7 @@ class TestPercentileMetric:
         intent = QueryIntent.model_validate({
             "source": "orders", "metrics": ["p95_amount"]
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         assert "QUANTILE_CONT(amount, 0.95)" in sql
 
     def test_percentile_executes_correctly(self) -> None:
@@ -666,7 +666,7 @@ class TestPercentileMetric:
         intent = QueryIntent.model_validate({
             "source": "orders", "metrics": ["p95_amount"]
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         result = con.execute(sql).fetchone()
         # 4 rows of amount in {100, 200, 50, 300}; p95 ≈ 285 with linear interp
         assert 250.0 <= float(result[0]) <= 300.0
@@ -680,7 +680,7 @@ class TestPercentileMetric:
             "metrics": ["p95_amount"],
             "dimensions": ["orders.region"],
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         assert "GROUP BY" in sql
         rows = con.execute(sql).fetchall()
         # 3 distinct regions: west, east, north
@@ -720,7 +720,7 @@ class TestRollingWindowMetric:
         intent = QueryIntent.model_validate({
             "source": "orders", "metrics": ["revenue_7d_rolling"]
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         assert "OVER" in sql
         assert "ORDER BY order_date" in sql
         assert "RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW" in sql
@@ -735,7 +735,7 @@ class TestRollingWindowMetric:
             "source": "orders", "metrics": ["revenue_7d_rolling"],
             "limit": 100,
         })
-        sql = compile_intent(intent, cat)
+        sql = compile_intent(intent, cat).render()
         rows = con.execute(sql).fetchall()
         # Fixture has 4 rows; window emits per-row -> 4 rolling values
         assert len(rows) == 4

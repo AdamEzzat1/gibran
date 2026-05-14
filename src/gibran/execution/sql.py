@@ -150,59 +150,148 @@ def _parse_for_governance(sql: str) -> tuple[str, frozenset[str]]:
             f"only SELECT supported in V1, got {type(parsed).__name__}"
         )
 
-    if list(parsed.find_all(exp.Join)):
-        raise UnsupportedQueryError("joins not supported in V1 (single-source only)")
+    # CTEs ARE supported in V1 (Tier 3 work). The DSL compiler may emit
+    # `WITH a AS (...), b AS (...) SELECT ...` for multi-stage primitives
+    # like cohort_retention and funnel. Joins must therefore be allowed
+    # too -- those primitives self-join the same source inside a CTE.
+    # Subqueries remain forbidden in V1: they introduce a column-scoping
+    # complexity (nested SELECTs can rebind names) that the governance
+    # walker doesn't handle yet. CTEs cover the same expressive territory
+    # for the primitives we care about.
     if list(parsed.find_all(exp.Subquery)):
-        raise UnsupportedQueryError("subqueries not supported in V1")
-    if list(parsed.find_all(exp.With)):
-        raise UnsupportedQueryError("CTEs not supported in V1")
-
-    for proj in parsed.expressions:
-        if isinstance(proj, exp.Star):
-            raise UnsupportedQueryError(
-                "SELECT * not supported; enumerate columns explicitly so "
-                "governance can enforce column-level access"
-            )
-        if isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star):
-            raise UnsupportedQueryError(
-                "SELECT t.* not supported; enumerate columns explicitly"
-            )
-
-    from_clause = parsed.find(exp.From)
-    if from_clause is None:
-        raise UnsupportedQueryError("query must have a FROM clause")
-    tables = list(from_clause.find_all(exp.Table))
-    if len(tables) != 1:
         raise UnsupportedQueryError(
-            f"V1 supports exactly one source; got {len(tables)}"
+            "subqueries not supported in V1 (use a CTE instead)"
         )
-    # Resolve the source identifier. For a relational FROM (`FROM orders`,
-    # `FROM orders o`), `table.name` is the relation name and we use that
-    # -- aliases like `o` are local to the query and not the governance key.
-    # For a file-scan FROM (`FROM read_parquet('x.parquet') AS orders`),
-    # `table.name` is empty because the relation is a function call; we
-    # fall back to the alias, which the DSL compiler attaches precisely so
-    # governance can locate the source.
-    source_id = tables[0].name or tables[0].alias_or_name
 
-    # Collect SELECT aliases so we can distinguish real column references
-    # from alias references (which appear in HAVING / ORDER BY when DSL
-    # compilation emits e.g. `HAVING ("gross_revenue" > 50)`). sqlglot's
-    # `find_all(exp.Column)` returns both, so we filter by name.
-    #
-    # V1 limitation: a query like `SELECT amount AS amount FROM t` would
-    # exclude the legitimate column reference. We don't generate such SQL
-    # from the DSL (aliases like metric_id and dim_id are distinct from
-    # column names), and user-authored raw SQL rarely uses `col AS col`.
-    aliases: set[str] = set()
-    for proj in parsed.expressions:
-        if isinstance(proj, exp.Alias):
-            aliases.add(proj.alias)
+    # Collect CTE names so we can distinguish CTE references from real
+    # tables in the source-extraction step. sqlglot represents a CTE
+    # reference (`FROM cohorts`) as an exp.Table node identical in shape
+    # to a real table reference -- the only way to tell them apart is by
+    # whether the name appears in a `WITH ... AS (...)` binding.
+    cte_names: set[str] = set()
+    # sqlglot keys this as "with_" (trailing underscore) to avoid clashing
+    # with the Python keyword.
+    with_clause = parsed.args.get("with_") or parsed.args.get("with")
+    if with_clause is not None:
+        for cte in with_clause.expressions:
+            # exp.CTE has .alias (the name after WITH) and .this (the inner SELECT)
+            cte_names.add(cte.alias_or_name)
 
+    # SELECT * is forbidden EVERYWHERE in the tree (including inside CTE
+    # bodies). If a CTE selected `*`, governance couldn't enumerate which
+    # columns the query reads without re-resolving the underlying schema.
+    for select_node in parsed.find_all(exp.Select):
+        for proj in select_node.expressions:
+            if isinstance(proj, exp.Star):
+                raise UnsupportedQueryError(
+                    "SELECT * not supported; enumerate columns explicitly so "
+                    "governance can enforce column-level access"
+                )
+            if isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star):
+                raise UnsupportedQueryError(
+                    "SELECT t.* not supported; enumerate columns explicitly"
+                )
+
+    # Collect every Table reference across the whole tree (outer SELECT
+    # + every CTE body) and filter out the CTE-name references. What's
+    # left are real table references -- governance's single-source unit.
+    all_tables = list(parsed.find_all(exp.Table))
+    real_tables = [t for t in all_tables if t.name not in cte_names]
+    if not real_tables:
+        raise UnsupportedQueryError("query must have a FROM clause")
+    # Resolve each real-table reference to a source_id. For a relational
+    # FROM (`FROM orders`, `FROM orders o`), `table.name` is the relation
+    # and we use that -- the alias is local. For a file-scan FROM
+    # (`FROM read_parquet('x.parquet') AS orders`), `table.name` is empty
+    # (the relation is a function call) so we fall back to the alias,
+    # which the DSL compiler attaches so governance can find the source.
+    source_ids = {t.name or t.alias_or_name for t in real_tables}
+    if len(source_ids) != 1:
+        raise UnsupportedQueryError(
+            f"V1 supports exactly one source across the query "
+            f"(including all CTEs); got {sorted(source_ids)}"
+        )
+    [source_id] = source_ids
+
+    # Column extraction. The subtle rule: alias names (from this SELECT
+    # or from CTE projections) are valid references ONLY in HAVING /
+    # ORDER BY positions, where SQL allows them. Everywhere else --
+    # SELECT-list, WHERE, GROUP BY, FROM/JOIN conditions, and inside
+    # function calls -- a Column reference is a REAL column even if its
+    # name happens to match an alias somewhere (`amount AS amount` is a
+    # real `amount` reference with a same-named alias on top).
     columns: set[str] = set()
-    for col in parsed.find_all(exp.Column):
-        if col.name and col.name != "*" and col.name not in aliases:
+
+    # Collect CTE inner SELECTs so we can scope each one separately.
+    cte_inner_selects: list[exp.Select] = []
+    if with_clause is not None:
+        for cte in with_clause.expressions:
+            inner = cte.this
+            if isinstance(inner, exp.Select):
+                cte_inner_selects.append(inner)
+
+    def _is_in_having_or_order(col: exp.Expression, anchor: exp.Select) -> bool:
+        """Walk col's ancestor chain; return True if HAVING or ORDER BY
+        sits between col and the anchor SELECT (i.e. col is a reference
+        in a HAVING/ORDER BY position of `anchor`)."""
+        p = col.parent
+        while p is not None and p is not anchor:
+            if isinstance(p, (exp.Having, exp.Order)):
+                return True
+            p = p.parent
+        return False
+
+    def _inside_any_cte(node: exp.Expression) -> bool:
+        anc = node.parent
+        while anc is not None:
+            if anc in cte_inner_selects:
+                return True
+            anc = anc.parent
+        return False
+
+    # Walk each CTE body with its own alias scope.
+    for inner in cte_inner_selects:
+        inner_aliases: set[str] = {
+            p.alias for p in inner.expressions if isinstance(p, exp.Alias)
+        }
+        for col in inner.find_all(exp.Column):
+            if not col.name or col.name == "*":
+                continue
+            if col.name in inner_aliases and _is_in_having_or_order(col, inner):
+                continue  # self-reference to this CTE's projection alias
             columns.add(col.name)
+
+    # Walk the outer SELECT. Two distinct filter sets:
+    #   * `cte_output_names`: SYNTHESIZED projections from CTEs (those with
+    #     an exp.Alias node), like `COUNT(*) AS cohort_size`. References
+    #     to these in the OUTER SELECT (at any position) are CTE-output
+    #     references, NOT real columns. Pass-through projections like
+    #     `SELECT user_id FROM orders` are bare exp.Column nodes (no
+    #     Alias) and intentionally don't go into this set: a later
+    #     `o.user_id` reference IS a real column we want governance to
+    #     see.
+    #   * `outer_aliases`: aliases declared in the OUTER SELECT's
+    #     projection. These are only valid as references in HAVING /
+    #     ORDER BY -- so we apply that filter only there.
+    cte_output_names: set[str] = set()
+    for inner in cte_inner_selects:
+        for p in inner.expressions:
+            if isinstance(p, exp.Alias):
+                cte_output_names.add(p.alias)
+    outer_aliases: set[str] = {
+        proj.alias for proj in parsed.expressions if isinstance(proj, exp.Alias)
+    }
+
+    for col in parsed.find_all(exp.Column):
+        if _inside_any_cte(col):
+            continue
+        if not col.name or col.name == "*":
+            continue
+        if col.name in cte_output_names:
+            continue  # reference to a synthesized CTE projection
+        if col.name in outer_aliases and _is_in_having_or_order(col, parsed):
+            continue  # self-reference to outer-SELECT alias
+        columns.add(col.name)
 
     return source_id, frozenset(columns)
 

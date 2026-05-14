@@ -86,7 +86,7 @@ def run_dsl_query(
     # Compile to SQL
     catalog = Catalog(con)
     try:
-        sql = compile_intent(intent, catalog)
+        sql = compile_intent(intent, catalog).render()
     except CompileError as e:
         return _pre_compile_failure(
             con, identity, intent_json, started_ns,

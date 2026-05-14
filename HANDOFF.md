@@ -7,7 +7,9 @@ build next, why, and in what order.
 
 Commit checkpoint: `c77f911` — Initial commit: Gibran V1.
 Last verified: Tier 2 Items 6 + 7 complete (time-bound policies + audit-log
-redaction; schema-drift detection in `gibran sync`). 349 tests passing.
+redaction; schema-drift detection in `gibran sync`); Tier 3 CTE
+infrastructure landed (CompiledQuery/CTE dataclasses; execution layer
+walks columns through CTE bodies). 364 tests passing.
 
 ---
 
@@ -343,7 +345,15 @@ high-leverage); (b) benchmarks become a prerequisite for any perf work;
 
 ### Tier 3 — architectural, unlocks the next round
 
-10. **CTE compiler infrastructure** — standalone refactor. Compiler learns
+10. **CTE compiler infrastructure** — *Done. `compile_intent` now returns
+    `CompiledQuery(ctes: tuple[CTE, ...], main_sql: str)` instead of a
+    bare string; `.render()` assembles `WITH ... SELECT ...`. Execution
+    layer's `_parse_for_governance` accepts CTEs, walks columns through
+    CTE bodies for governance (sensitive cols inside a CTE are still
+    enforced), preserves the single-source constraint across CTE +
+    outer references, and distinguishes synthesized CTE projection
+    names (filtered) from pass-through column refs (counted). +15
+    tests (test_cte_infra.py).* Standalone refactor. Compiler learns
     to emit `WITH a AS (...), b AS (...) SELECT ...`. Spec in §3.2.
 11. **`cohort_retention` metric primitive** (on top of CTE infra).
 12. **`funnel` metric primitive** (on top of CTE infra).

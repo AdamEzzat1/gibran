@@ -204,7 +204,7 @@ class TestDSLCompileAgainstParquet:
         sql = compile_intent(
             QueryIntent(source="orders", metrics=["order_count"]),
             Catalog(con),
-        )
+        ).render()
         # The compiled SQL should reference read_parquet, with an alias of 'orders'.
         assert "read_parquet(" in sql
         assert 'AS "orders"' in sql
@@ -238,7 +238,7 @@ class TestDSLCompileEmitsRelationalFrom:
         sql = compile_intent(
             QueryIntent(source="orders", metrics=["order_count"]),
             Catalog(con),
-        )
+        ).render()
         assert 'FROM "orders"' in sql
         assert "read_parquet" not in sql
         assert "read_csv" not in sql
