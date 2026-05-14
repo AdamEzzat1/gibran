@@ -213,16 +213,22 @@ def _parse_for_governance(sql: str) -> tuple[str, frozenset[str]]:
         )
     [source_id] = source_ids
 
-    # Column extraction. The subtle rule: alias names (from this SELECT
-    # or from CTE projections) are valid references ONLY in HAVING /
-    # ORDER BY positions, where SQL allows them. Everywhere else --
-    # SELECT-list, WHERE, GROUP BY, FROM/JOIN conditions, and inside
-    # function calls -- a Column reference is a REAL column even if its
-    # name happens to match an alias somewhere (`amount AS amount` is a
-    # real `amount` reference with a same-named alias on top).
+    # Column extraction. Subtle rules:
+    #   * alias names (from this SELECT or from a CTE's projection) are
+    #     valid references ONLY in HAVING / ORDER BY positions; elsewhere
+    #     a same-named Column ref is a real column.
+    #   * references to OTHER CTEs (via a table alias bound to a CTE name
+    #     in the FROM/JOIN) are NOT real-column refs -- they're refs to
+    #     synthesized CTE outputs and should be skipped. The walker has
+    #     ALREADY found the underlying real columns inside that other
+    #     CTE's body, so skipping the indirect reference here doesn't
+    #     lose information.
+    #   * for unprefixed Column refs in a CTE body that has NO real
+    #     source in its FROM (e.g. a CTE that FROMs another CTE), every
+    #     unprefixed ref must be a CTE-output ref -- skip it.
     columns: set[str] = set()
 
-    # Collect CTE inner SELECTs so we can scope each one separately.
+    # Collect CTE inner SELECTs.
     cte_inner_selects: list[exp.Select] = []
     if with_clause is not None:
         for cte in with_clause.expressions:
@@ -231,9 +237,6 @@ def _parse_for_governance(sql: str) -> tuple[str, frozenset[str]]:
                 cte_inner_selects.append(inner)
 
     def _is_in_having_or_order(col: exp.Expression, anchor: exp.Select) -> bool:
-        """Walk col's ancestor chain; return True if HAVING or ORDER BY
-        sits between col and the anchor SELECT (i.e. col is a reference
-        in a HAVING/ORDER BY position of `anchor`)."""
         p = col.parent
         while p is not None and p is not anchor:
             if isinstance(p, (exp.Having, exp.Order)):
@@ -249,49 +252,79 @@ def _parse_for_governance(sql: str) -> tuple[str, frozenset[str]]:
             anc = anc.parent
         return False
 
+    def _from_aliases(select_node: exp.Select) -> tuple[set[str], bool]:
+        """Return (table aliases bound to CTEs in this SELECT's FROM/JOIN,
+        whether any real (non-CTE) source appears in the FROM/JOIN)."""
+        cte_table_aliases: set[str] = set()
+        has_real_source = False
+        scopes = []
+        from_ = select_node.args.get("from_") or select_node.args.get("from")
+        if from_ is not None:
+            scopes.append(from_)
+        scopes.extend(select_node.args.get("joins") or [])
+        for scope in scopes:
+            for t in scope.find_all(exp.Table):
+                if t.name in cte_names:
+                    cte_table_aliases.add(t.alias_or_name)
+                else:
+                    has_real_source = True
+        return cte_table_aliases, has_real_source
+
+    def _walk_select_columns(select_node: exp.Select, *, outer_synth: set[str]) -> None:
+        """Collect real-column refs from one SELECT scope. `outer_synth`
+        is the alias-name set whose references are only valid in
+        HAVING/ORDER BY of this SELECT (the SELECT's own aliases)."""
+        cte_table_aliases, has_real_source = _from_aliases(select_node)
+        for col in select_node.find_all(exp.Column):
+            # Skip columns that belong to a DEEPER CTE -- they'll be
+            # walked when that CTE's own scope is processed.
+            if _inside_any_cte(col) and select_node not in cte_inner_selects:
+                continue
+            # When walking the OUTER SELECT, skip columns inside ANY CTE
+            # (those were processed in their own pass).
+            if select_node is parsed and _inside_any_cte(col):
+                continue
+            # When walking a specific CTE body, skip columns that are
+            # inside a DIFFERENT CTE's body (shouldn't happen in V1 but
+            # defensive).
+            if select_node in cte_inner_selects:
+                anc = col.parent
+                while anc is not None:
+                    if anc in cte_inner_selects and anc is not select_node:
+                        break
+                    anc = anc.parent
+                else:
+                    anc = None
+                if anc is not None:
+                    continue
+            if not col.name or col.name == "*":
+                continue
+            # Self-reference to this SELECT's alias in HAVING/ORDER BY.
+            if col.name in outer_synth and _is_in_having_or_order(col, select_node):
+                continue
+            # Explicit reference to a CTE-bound table alias (e.g. `r.entity`
+            # where `r` aliases a CTE in this scope's FROM).
+            if col.table and col.table in cte_table_aliases:
+                continue
+            # Unprefixed ref in a body whose FROM contains NO real source.
+            # In SQL, an unprefixed col resolves to the only table in scope,
+            # which here is a CTE -- so the ref is to that CTE's output.
+            if not col.table and cte_table_aliases and not has_real_source:
+                continue
+            columns.add(col.name)
+
     # Walk each CTE body with its own alias scope.
     for inner in cte_inner_selects:
         inner_aliases: set[str] = {
             p.alias for p in inner.expressions if isinstance(p, exp.Alias)
         }
-        for col in inner.find_all(exp.Column):
-            if not col.name or col.name == "*":
-                continue
-            if col.name in inner_aliases and _is_in_having_or_order(col, inner):
-                continue  # self-reference to this CTE's projection alias
-            columns.add(col.name)
+        _walk_select_columns(inner, outer_synth=inner_aliases)
 
-    # Walk the outer SELECT. Two distinct filter sets:
-    #   * `cte_output_names`: SYNTHESIZED projections from CTEs (those with
-    #     an exp.Alias node), like `COUNT(*) AS cohort_size`. References
-    #     to these in the OUTER SELECT (at any position) are CTE-output
-    #     references, NOT real columns. Pass-through projections like
-    #     `SELECT user_id FROM orders` are bare exp.Column nodes (no
-    #     Alias) and intentionally don't go into this set: a later
-    #     `o.user_id` reference IS a real column we want governance to
-    #     see.
-    #   * `outer_aliases`: aliases declared in the OUTER SELECT's
-    #     projection. These are only valid as references in HAVING /
-    #     ORDER BY -- so we apply that filter only there.
-    cte_output_names: set[str] = set()
-    for inner in cte_inner_selects:
-        for p in inner.expressions:
-            if isinstance(p, exp.Alias):
-                cte_output_names.add(p.alias)
+    # Walk the outer SELECT.
     outer_aliases: set[str] = {
         proj.alias for proj in parsed.expressions if isinstance(proj, exp.Alias)
     }
-
-    for col in parsed.find_all(exp.Column):
-        if _inside_any_cte(col):
-            continue
-        if not col.name or col.name == "*":
-            continue
-        if col.name in cte_output_names:
-            continue  # reference to a synthesized CTE projection
-        if col.name in outer_aliases and _is_in_having_or_order(col, parsed):
-            continue  # self-reference to outer-SELECT alias
-        columns.add(col.name)
+    _walk_select_columns(parsed, outer_synth=outer_aliases)
 
     return source_id, frozenset(columns)
 

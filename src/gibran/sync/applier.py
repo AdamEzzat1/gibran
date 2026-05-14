@@ -199,6 +199,20 @@ def _render_metric_config(m: MetricConfig) -> str | None:
             "period_unit": m.period_unit,
             "comparison": m.comparison,
         })
+    if m.type == "cohort_retention":
+        return json.dumps({
+            "entity_column": m.entity_column,
+            "event_column": m.event_column,
+            "cohort_grain": m.cohort_grain,
+            "retention_grain": m.retention_grain,
+            "max_periods": m.max_periods,
+        })
+    if m.type == "funnel":
+        return json.dumps({
+            "entity_column": m.funnel_entity_column,
+            "event_order_column": m.funnel_event_order_column,
+            "steps": m.funnel_steps,
+        })
     return None
 
 
@@ -221,6 +235,43 @@ def _render_expression(m: MetricConfig) -> str:
         # store a marker; the compiler reads metric_config and ignores
         # this string.
         return f"period_over_period[{m.base_metric}@{m.period_unit}/{m.comparison}]"
+    if m.type == "cohort_retention":
+        # The whole-query CTE shape is built by the compiler from
+        # metric_config. Marker only.
+        return (
+            f"cohort_retention[{m.entity_column}/{m.event_column}/"
+            f"{m.cohort_grain}->{m.retention_grain}]"
+        )
+    if m.type == "funnel":
+        # Same: CTE chain built by the compiler from metric_config.
+        return f"funnel[{m.funnel_entity_column}/{len(m.funnel_steps or [])} steps]"
+    if m.type == "weighted_avg":
+        # SUM(value * weight) / NULLIF(SUM(weight), 0). Single-pass aggregate.
+        assert m.expression is not None and m.weight_column is not None
+        return (
+            f"SUM(({m.expression}) * {m.weight_column}) "
+            f"/ NULLIF(SUM({m.weight_column}), 0)"
+        )
+    if m.type == "stddev_samp":
+        assert m.expression is not None
+        return f"STDDEV_SAMP({m.expression})"
+    if m.type == "stddev_pop":
+        assert m.expression is not None
+        return f"STDDEV_POP({m.expression})"
+    if m.type == "count_distinct":
+        assert m.column is not None
+        return f"COUNT(DISTINCT {m.column})"
+    if m.type == "count_distinct_approx":
+        # DuckDB's HyperLogLog-based approximate distinct count.
+        assert m.column is not None
+        return f"APPROX_COUNT_DISTINCT({m.column})"
+    if m.type == "mode":
+        # DuckDB returns the most common value of `column`. SQL standard
+        # spells it `MODE() WITHIN GROUP (ORDER BY col)` but DuckDB also
+        # accepts the function form, which is concise and composes with
+        # FILTER + GROUP BY uniformly.
+        assert m.column is not None
+        return f"MODE({m.column})"
     if m.type == "rolling_window":
         # SQL grammar for window-aggregate-with-filter requires:
         #   aggregate(args) [FILTER (WHERE cond)] OVER (window_spec)

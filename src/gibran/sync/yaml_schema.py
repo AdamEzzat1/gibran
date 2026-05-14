@@ -47,13 +47,16 @@ MetricType = Literal[
     "count", "sum", "avg", "min", "max", "ratio", "expression",
     "percentile", "rolling_window",
     "period_over_period",
-    # cohort_retention, funnel: deferred (require multi-stage SQL / CTE
-    # infrastructure)
+    "cohort_retention", "funnel",
+    # Aggregate primitives (Tier 2 Item 5):
+    "weighted_avg", "stddev_samp", "stddev_pop",
+    "count_distinct", "count_distinct_approx", "mode",
 ]
 
 RollingAggregate = Literal["sum", "avg", "min", "max", "count"]
 PeriodUnit = Literal["year", "quarter", "month", "week", "day"]
 PeriodComparison = Literal["delta", "ratio", "pct_change"]
+CohortGrain = Literal["year", "quarter", "month", "week", "day"]
 
 
 class MetricConfig(_Strict):
@@ -84,6 +87,33 @@ class MetricConfig(_Strict):
     period_dim: str | None = None
     period_unit: PeriodUnit | None = None
     comparison: PeriodComparison | None = None
+
+    # cohort_retention-specific. The output is a fixed-shape table:
+    #   (cohort_start, periods_since_cohort, retained_count, cohort_size, retention_rate)
+    # When the intent's metrics include a cohort_retention metric, the
+    # compiler short-circuits the normal SELECT-list builder and emits
+    # a 3-CTE query whose columns are the above. Intent.dimensions must
+    # be empty and the cohort metric must be the only entry in
+    # intent.metrics (enforced by dsl/validate.py).
+    entity_column: str | None = None      # e.g. customer_id -- the entity being cohorted
+    event_column: str | None = None       # e.g. order_date  -- when each entity "shows up"
+    cohort_grain: CohortGrain | None = None
+    retention_grain: CohortGrain | None = None
+    max_periods: int | None = None        # cap the periods_since_cohort dimension
+
+    # funnel-specific. The output is also a fixed-shape table:
+    #   (step_name, entity_count, conversion_from_previous, conversion_from_first)
+    # `steps` is an ordered list of `(name, condition_sql)` pairs that
+    # define each funnel stage. Same single-metric / no-dimensions
+    # constraint as cohort_retention.
+    funnel_entity_column: str | None = None    # the entity (user_id, customer_id, ...)
+    funnel_event_order_column: str | None = None  # event timestamp for sequencing
+    funnel_steps: list[dict[str, str]] | None = None  # [{name, condition}, ...]
+
+    # aggregate-primitive-specific (Tier 2 Item 5):
+    #   weighted_avg requires weight_column (alongside expression for the value)
+    #   mode reuses `column` (the value to find the mode of)
+    weight_column: str | None = None
 
     @model_validator(mode="after")
     def _check_shape(self) -> "MetricConfig":
@@ -149,6 +179,95 @@ class MetricConfig(_Strict):
                 raise ValueError(
                     f"metric {self.id!r}: period_over_period cannot have "
                     f"expression/numerator/denominator (use base_metric instead)"
+                )
+        elif self.type == "cohort_retention":
+            missing = [
+                f for f in (
+                    "entity_column", "event_column",
+                    "cohort_grain", "retention_grain",
+                )
+                if getattr(self, f) is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"metric {self.id!r}: cohort_retention requires {missing}"
+                )
+            if self.max_periods is not None and self.max_periods <= 0:
+                raise ValueError(
+                    f"metric {self.id!r}: cohort_retention max_periods must be > 0"
+                )
+            if self.expression or self.numerator or self.denominator:
+                raise ValueError(
+                    f"metric {self.id!r}: cohort_retention cannot have "
+                    f"expression/numerator/denominator"
+                )
+        elif self.type == "funnel":
+            missing = [
+                f for f in (
+                    "funnel_entity_column", "funnel_event_order_column", "funnel_steps",
+                )
+                if getattr(self, f) is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"metric {self.id!r}: funnel requires {missing}"
+                )
+            assert self.funnel_steps is not None
+            if len(self.funnel_steps) < 2:
+                raise ValueError(
+                    f"metric {self.id!r}: funnel requires at least 2 steps"
+                )
+            seen_names: set[str] = set()
+            for i, step in enumerate(self.funnel_steps):
+                if not isinstance(step, dict):
+                    raise ValueError(
+                        f"metric {self.id!r}: funnel step {i} must be a dict, "
+                        f"got {type(step).__name__}"
+                    )
+                if "name" not in step or "condition" not in step:
+                    raise ValueError(
+                        f"metric {self.id!r}: funnel step {i} requires "
+                        f"`name` and `condition` keys"
+                    )
+                if step["name"] in seen_names:
+                    raise ValueError(
+                        f"metric {self.id!r}: funnel step name {step['name']!r} "
+                        f"appears more than once"
+                    )
+                seen_names.add(step["name"])
+            if self.expression or self.numerator or self.denominator:
+                raise ValueError(
+                    f"metric {self.id!r}: funnel cannot have "
+                    f"expression/numerator/denominator"
+                )
+        elif self.type == "weighted_avg":
+            if self.expression is None or self.weight_column is None:
+                raise ValueError(
+                    f"metric {self.id!r}: weighted_avg requires `expression` "
+                    f"(the value) and `weight_column`"
+                )
+            if self.numerator or self.denominator:
+                raise ValueError(
+                    f"metric {self.id!r}: weighted_avg cannot have numerator/denominator"
+                )
+        elif self.type in ("stddev_samp", "stddev_pop"):
+            if not self.expression:
+                raise ValueError(
+                    f"metric {self.id!r}: {self.type} requires `expression`"
+                )
+            if self.numerator or self.denominator:
+                raise ValueError(
+                    f"metric {self.id!r}: {self.type} cannot have numerator/denominator"
+                )
+        elif self.type in ("count_distinct", "count_distinct_approx", "mode"):
+            if self.column is None:
+                raise ValueError(
+                    f"metric {self.id!r}: {self.type} requires `column`"
+                )
+            if self.expression or self.numerator or self.denominator:
+                raise ValueError(
+                    f"metric {self.id!r}: {self.type} cannot have "
+                    f"expression/numerator/denominator"
                 )
         else:  # sum, avg, min, max
             if not self.expression:

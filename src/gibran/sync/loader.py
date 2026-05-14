@@ -135,6 +135,46 @@ def _validate_cross_entity(cfg: GibranConfig) -> dict[str, frozenset[str]]:
                     f"temporal dimension (got {getattr(period_dim, 'type', None)!r})"
                 )
             deps[m.id].add(m.base_metric)
+        elif m.type == "cohort_retention":
+            cols = columns_by_source.get(m.source, frozenset())
+            for col_field, col_value in (
+                ("entity_column", m.entity_column),
+                ("event_column", m.event_column),
+            ):
+                assert col_value is not None
+                if col_value not in cols:
+                    raise ConfigValidationError(
+                        f"metric {m.id!r}: {col_field} {col_value!r} not "
+                        f"defined on source {m.source!r}"
+                    )
+        elif m.type == "funnel":
+            cols = columns_by_source.get(m.source, frozenset())
+            for col_field, col_value in (
+                ("funnel_entity_column", m.funnel_entity_column),
+                ("funnel_event_order_column", m.funnel_event_order_column),
+            ):
+                assert col_value is not None
+                if col_value not in cols:
+                    raise ConfigValidationError(
+                        f"metric {m.id!r}: {col_field} {col_value!r} not "
+                        f"defined on source {m.source!r}"
+                    )
+        elif m.type == "weighted_avg":
+            if m.weight_column is not None:
+                cols = columns_by_source.get(m.source, frozenset())
+                if m.weight_column not in cols:
+                    raise ConfigValidationError(
+                        f"metric {m.id!r}: weight_column {m.weight_column!r} "
+                        f"not defined on source {m.source!r}"
+                    )
+        elif m.type in ("count_distinct", "count_distinct_approx", "mode"):
+            if m.column is not None:
+                cols = columns_by_source.get(m.source, frozenset())
+                if m.column not in cols:
+                    raise ConfigValidationError(
+                        f"metric {m.id!r}: column {m.column!r} not defined "
+                        f"on source {m.source!r}"
+                    )
     _detect_cycles(deps)
 
     for p in cfg.policies:

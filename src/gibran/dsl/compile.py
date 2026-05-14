@@ -177,9 +177,9 @@ def compile_intent(intent: QueryIntent, catalog: Catalog) -> CompiledQuery:
     """Compile a validated intent to a CompiledQuery.
 
     For V1's single-SELECT primitives the returned CompiledQuery has
-    empty `ctes` and `main_sql` holds the entire query. Future
-    CTE-based primitives (cohort_retention, funnel) will populate
-    `ctes`. Callers that need a flat SQL string call `.render()`.
+    empty `ctes` and `main_sql` holds the entire query. CTE-based
+    primitives (cohort_retention, funnel) populate `ctes` and the
+    main_sql aggregates over the CTEs' outputs.
 
     Pre-conditions (caller MUST have run):
       1. QueryIntent.model_validate succeeded (Pydantic structural check)
@@ -192,6 +192,28 @@ def compile_intent(intent: QueryIntent, catalog: Catalog) -> CompiledQuery:
         raise CompileError(str(e)) from e
 
     metric_metas = [catalog.get_metric(m) for m in intent.metrics]
+
+    # Shape-primitives short-circuit: cohort_retention and funnel are
+    # whole-query primitives that emit a fixed column shape via CTEs.
+    # They cannot be combined with other metrics or with intent.dimensions
+    # (the dsl validator enforces those preconditions; we double-check).
+    for meta in metric_metas:
+        if meta.metric_type == "cohort_retention":
+            if len(metric_metas) != 1 or intent.dimensions:
+                raise CompileError(
+                    f"cohort_retention metric {meta.metric_id!r} must be the "
+                    f"only metric in the intent and intent.dimensions must "
+                    f"be empty"
+                )
+            return _build_cohort_retention(meta, from_relation, intent)
+        if meta.metric_type == "funnel":
+            if len(metric_metas) != 1 or intent.dimensions:
+                raise CompileError(
+                    f"funnel metric {meta.metric_id!r} must be the only "
+                    f"metric in the intent and intent.dimensions must be "
+                    f"empty"
+                )
+            return _build_funnel(meta, from_relation, intent)
     dim_metas = [
         (dim, catalog.get_dimension(dim.id)) for dim in intent.dimensions
     ]
@@ -460,3 +482,200 @@ def _render_having(h) -> str:
         rendered = ", ".join(render_literal(v) for v in h.value)
         return f"({alias} NOT IN ({rendered}))"
     raise CompileError(f"unhandled having op: {h.op!r}")  # pragma: no cover
+
+
+# ---------------------------------------------------------------------------
+# cohort_retention
+# ---------------------------------------------------------------------------
+
+def _build_cohort_retention(
+    meta: _MetricMeta, from_relation: str, intent: QueryIntent
+) -> CompiledQuery:
+    """Emit the 3-CTE cohort-retention query.
+
+    Output shape:
+        (cohort_start, periods_since_cohort, retained_count,
+         cohort_size, retention_rate)
+
+    The CTEs:
+      1. cohorts   -- each entity's first event truncated to cohort_grain
+      2. retention -- each subsequent event with its period offset
+      3. cohort_sizes -- per-cohort total entity count
+    Final SELECT joins retention to cohort_sizes for the rate column.
+    """
+    cfg = meta.metric_config
+    if not cfg:
+        raise CompileError(
+            f"cohort_retention metric {meta.metric_id!r} is missing "
+            f"metric_config (was the sync run after the cohort_retention "
+            f"primitive was added?)"
+        )
+    entity_col = qident(cfg["entity_column"])
+    event_col = qident(cfg["event_column"])
+    cohort_grain = cfg["cohort_grain"]
+    retention_grain = cfg["retention_grain"]
+    max_periods = cfg.get("max_periods")
+
+    # FROM clause for the underlying source. For file-scan sources the
+    # dispatcher returns `read_parquet(...)` which we need to alias so
+    # references to the source's relation name resolve.
+    if from_relation.startswith(("read_parquet(", "read_csv(")):
+        source_from = f"{from_relation} AS {qident(intent.source)}"
+    else:
+        source_from = from_relation
+
+    period_filter = ""
+    if max_periods is not None:
+        period_filter = (
+            f"WHERE DATE_DIFF('{retention_grain}', "
+            f"DATE_TRUNC('{cohort_grain}', _entry.first_event), "
+            f"DATE_TRUNC('{retention_grain}', {event_col})) "
+            f"BETWEEN 0 AND {int(max_periods)}"
+        )
+
+    cohorts_sql = (
+        f"SELECT {entity_col} AS entity, "
+        f"DATE_TRUNC('{cohort_grain}', MIN({event_col})) AS first_event\n"
+        f"FROM {source_from}\n"
+        f"GROUP BY {entity_col}"
+    )
+
+    retention_sql = (
+        f"SELECT _entry.first_event AS cohort_start, "
+        f"DATE_DIFF('{retention_grain}', "
+        f"_entry.first_event, "
+        f"DATE_TRUNC('{retention_grain}', _src.{event_col})) "
+        f"AS periods_since_cohort, "
+        f"_src.{entity_col} AS entity\n"
+        f"FROM cohorts AS _entry\n"
+        f"JOIN {source_from} AS _src "
+        f"ON _src.{entity_col} = _entry.entity\n"
+        f"{period_filter}"
+    ).rstrip()
+
+    cohort_sizes_sql = (
+        f"SELECT first_event AS cohort_start, "
+        f"COUNT(DISTINCT entity) AS cohort_size\n"
+        f"FROM cohorts\n"
+        f"GROUP BY first_event"
+    )
+
+    main_sql = (
+        f"SELECT r.cohort_start, r.periods_since_cohort, "
+        f"COUNT(DISTINCT r.entity) AS retained_count, "
+        f"sc.cohort_size, "
+        f"COUNT(DISTINCT r.entity) * 1.0 / NULLIF(sc.cohort_size, 0) "
+        f"AS retention_rate\n"
+        f"FROM retention r\n"
+        f"JOIN cohort_sizes sc ON r.cohort_start = sc.cohort_start\n"
+        f"GROUP BY r.cohort_start, r.periods_since_cohort, sc.cohort_size\n"
+        f"ORDER BY r.cohort_start, r.periods_since_cohort\n"
+        f"LIMIT {intent.limit}"
+    )
+
+    return CompiledQuery(
+        ctes=(
+            CTE("cohorts", cohorts_sql),
+            CTE("retention", retention_sql, depends_on=("cohorts",)),
+            CTE("cohort_sizes", cohort_sizes_sql, depends_on=("cohorts",)),
+        ),
+        main_sql=main_sql,
+    )
+
+
+# ---------------------------------------------------------------------------
+# funnel
+# ---------------------------------------------------------------------------
+
+def _build_funnel(
+    meta: _MetricMeta, from_relation: str, intent: QueryIntent
+) -> CompiledQuery:
+    """Emit a CTE-chained funnel query.
+
+    Output shape:
+        (step_name, step_index, entity_count,
+         conversion_from_previous, conversion_from_first)
+
+    Each `step_<i>` CTE selects the entities that satisfy step i's
+    `condition` AND appear AFTER any entity's earliest matching event
+    for step i-1. The final SELECT aggregates per step + computes the
+    conversion ratios against step 0 and step i-1.
+    """
+    cfg = meta.metric_config
+    if not cfg:
+        raise CompileError(
+            f"funnel metric {meta.metric_id!r} is missing metric_config "
+            f"(was the sync run after the funnel primitive was added?)"
+        )
+    entity_col = qident(cfg["entity_column"])
+    order_col = qident(cfg["event_order_column"])
+    steps = cfg["steps"]
+    if not isinstance(steps, list) or len(steps) < 2:
+        raise CompileError(
+            f"funnel metric {meta.metric_id!r}: steps must be a list of "
+            f"at least 2 entries"
+        )
+
+    if from_relation.startswith(("read_parquet(", "read_csv(")):
+        source_from = f"{from_relation} AS {qident(intent.source)}"
+    else:
+        source_from = from_relation
+
+    ctes: list[CTE] = []
+    # Step 0: the entities that first satisfy step 0's condition.
+    step0 = steps[0]
+    step0_name = step0["name"]
+    step0_sql = (
+        f"SELECT {entity_col} AS entity, MIN({order_col}) AS step_time\n"
+        f"FROM {source_from}\n"
+        f"WHERE {step0['condition']}\n"
+        f"GROUP BY {entity_col}"
+    )
+    ctes.append(CTE("step_0", step0_sql))
+
+    # Subsequent steps: entity must satisfy this step's condition AT or
+    # AFTER its previous step's step_time. Self-join on the source to
+    # find the earliest qualifying event.
+    for i in range(1, len(steps)):
+        step = steps[i]
+        prev_name = f"step_{i - 1}"
+        step_sql = (
+            f"SELECT prev.entity AS entity, MIN(s.{order_col}) AS step_time\n"
+            f"FROM {prev_name} prev\n"
+            f"JOIN {source_from} AS s "
+            f"ON s.{entity_col} = prev.entity\n"
+            f"WHERE ({step['condition']}) "
+            f"AND s.{order_col} >= prev.step_time\n"
+            f"GROUP BY prev.entity"
+        )
+        ctes.append(CTE(f"step_{i}", step_sql, depends_on=(prev_name,)))
+
+    # Final aggregation. UNION ALL each step's count, then compute
+    # conversion ratios via window functions over the ordered step list.
+    union_parts = []
+    for i, step in enumerate(steps):
+        union_parts.append(
+            f"SELECT {render_literal(step['name'])} AS step_name, "
+            f"{i} AS step_index, COUNT(DISTINCT entity) AS entity_count "
+            f"FROM step_{i}"
+        )
+    counts_cte = "\nUNION ALL\n".join(union_parts)
+    ctes.append(
+        CTE("step_counts", counts_cte,
+            depends_on=tuple(f"step_{i}" for i in range(len(steps))))
+    )
+
+    main_sql = (
+        f"SELECT step_name, step_index, entity_count, "
+        f"entity_count * 1.0 / NULLIF("
+        f"LAG(entity_count) OVER (ORDER BY step_index), 0) "
+        f"AS conversion_from_previous, "
+        f"entity_count * 1.0 / NULLIF("
+        f"FIRST_VALUE(entity_count) OVER (ORDER BY step_index), 0) "
+        f"AS conversion_from_first\n"
+        f"FROM step_counts\n"
+        f"ORDER BY step_index\n"
+        f"LIMIT {intent.limit}"
+    )
+
+    return CompiledQuery(ctes=tuple(ctes), main_sql=main_sql)

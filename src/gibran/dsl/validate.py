@@ -118,6 +118,37 @@ def validate_intent(
             f"or use a non-rolling metric."
         )
 
+    # Shape-primitives (cohort_retention, funnel) emit a whole-query shape
+    # with their own dimensions baked in. They cannot be combined with
+    # other metrics, intent.dimensions, intent.filters, intent.having, or
+    # intent.order_by -- the compiler emits the whole query, so user-
+    # supplied modifiers have nowhere to plug in.
+    shape_metrics = [
+        m for m in schema.metrics
+        if m.metric_id in intent_metric_set
+        and m.metric_type in ("cohort_retention", "funnel")
+    ]
+    if shape_metrics:
+        sm = shape_metrics[0]
+        if len(intent.metrics) != 1:
+            raise IntentValidationError(
+                f"{sm.metric_type} metric {sm.metric_id!r} must be the only "
+                f"metric in the intent (it emits a whole-query shape and "
+                f"doesn't compose with other metrics in V1)"
+            )
+        if intent.dimensions:
+            raise IntentValidationError(
+                f"{sm.metric_type} metric {sm.metric_id!r} cannot be "
+                f"combined with intent.dimensions (the cohort/period or "
+                f"funnel-step dimensions are emitted by the primitive itself)"
+            )
+        if intent.filters or intent.having or intent.order_by:
+            raise IntentValidationError(
+                f"{sm.metric_type} metric {sm.metric_id!r} cannot be "
+                f"combined with intent.filters / having / order_by in V1 "
+                f"(the primitive emits the whole query)"
+            )
+
     # period_over_period metrics: their LAG window references DATE_TRUNC over
     # the metric's configured period_dim; the intent's dimension list must
     # therefore include that period_dim with a matching grain. Without this

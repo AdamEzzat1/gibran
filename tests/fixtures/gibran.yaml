@@ -91,6 +91,28 @@ metrics:
     comparison: delta
     unit: USD
     description: Change in gross revenue compared to the prior month.
+  - id: customer_retention
+    source: orders
+    display_name: Customer Retention
+    type: cohort_retention
+    entity_column: customer_email
+    event_column: order_date
+    cohort_grain: month
+    retention_grain: month
+    max_periods: 12
+    description: Monthly retention -- of customers first ordering in month N, what fraction return in subsequent months.
+  - id: paid_funnel
+    source: orders
+    display_name: Order -> Paid Funnel
+    type: funnel
+    funnel_entity_column: customer_email
+    funnel_event_order_column: order_date
+    funnel_steps:
+      - name: ordered
+        condition: status IN ('pending', 'paid')
+      - name: paid
+        condition: status = 'paid'
+    description: Two-step funnel -- ordered, then paid.
 
 roles:
   - id: analyst_west
