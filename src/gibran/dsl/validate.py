@@ -25,13 +25,15 @@ from typing import TYPE_CHECKING
 
 import duckdb
 
+from gibran.dsl.errors import IntentValidationError
 from gibran.dsl.types import QueryIntent
 from gibran.governance.ast import ASTValidationError, validate_intent_ast
 from gibran.governance.types import AllowedSchema
 
 
-class IntentValidationError(ValueError):
-    pass
+# Re-exported for backward compatibility: historical call-sites import
+# IntentValidationError from this module, not from dsl.errors.
+__all__ = ["IntentValidationError", "validate_intent"]
 
 
 def validate_intent(

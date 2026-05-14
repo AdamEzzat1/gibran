@@ -28,6 +28,11 @@ import duckdb
 
 from gibran._source_dispatch import SourceDispatchError, from_clause_for_source
 from gibran._sql import qident, render_literal
+from gibran.dsl.shape_primitives import (
+    SHAPE_PRIMITIVES,
+    ShapePrimitive,
+    register_shape_primitive,
+)
 from gibran.dsl.types import DimensionRef, QueryIntent
 from gibran.governance.ast import compile_intent_to_sql
 
@@ -825,3 +830,48 @@ def _build_multi_stage_filter(
         ),
         main_sql=main_sql,
     )
+
+
+# ---------------------------------------------------------------------------
+# Shape-primitive registry classes
+# ---------------------------------------------------------------------------
+#
+# These classes are the registry entries the compiler dispatches on. Each
+# is a thin wrapper around an existing `_build_*` function -- the SQL
+# emission logic stays here because it depends on module-private helpers
+# (`_MetricMeta`, the rendering functions). What the classes add is:
+#   1. Discoverability: SHAPE_PRIMITIVES.keys() lists every supported type.
+#   2. Precondition validation: each class owns its own validate_intent
+#      via the ShapePrimitive default, so dsl.validate doesn't need an
+#      if/elif chain that mirrors the compile-time one.
+#   3. Extensibility: a future user-declared shape primitive lands as a
+#      new @register_shape_primitive class -- no edit to compile_intent.
+
+@register_shape_primitive
+class CohortRetention(ShapePrimitive):
+    metric_type = "cohort_retention"
+
+    def build(
+        self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
+    ) -> CompiledQuery:
+        return _build_cohort_retention(meta, from_clause, intent)
+
+
+@register_shape_primitive
+class Funnel(ShapePrimitive):
+    metric_type = "funnel"
+
+    def build(
+        self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
+    ) -> CompiledQuery:
+        return _build_funnel(meta, from_clause, intent)
+
+
+@register_shape_primitive
+class MultiStageFilter(ShapePrimitive):
+    metric_type = "multi_stage_filter"
+
+    def build(
+        self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
+    ) -> CompiledQuery:
+        return _build_multi_stage_filter(meta, from_clause, intent)
