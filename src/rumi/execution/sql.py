@@ -21,6 +21,7 @@ import duckdb
 import sqlglot
 from sqlglot import exp
 
+from rumi.governance.redaction import redact_audit_payload
 from rumi.governance.types import (
     DenyReason,
     GovernanceAPI,
@@ -74,7 +75,12 @@ def run_sql_query(
     try:
         source_id, requested_columns = _parse_for_governance(sql)
     except (QueryParseError, UnsupportedQueryError) as e:
-        return _record_error(con, query_id, identity, sql, str(e), started_ns, nl_prompt=nl_prompt)
+        # source_id is unknown here -- redaction will fall back to the
+        # global sensitive-column set in lookup_sensitive_columns.
+        return _record_error(
+            con, query_id, identity, sql, str(e), started_ns,
+            nl_prompt=nl_prompt, source_id=None,
+        )
 
     decision = governance.evaluate(
         identity,
@@ -84,7 +90,10 @@ def run_sql_query(
     )
 
     if not decision.allowed:
-        return _record_denied(con, query_id, identity, sql, decision, started_ns, nl_prompt=nl_prompt)
+        return _record_denied(
+            con, query_id, identity, sql, decision, started_ns,
+            nl_prompt=nl_prompt, source_id=source_id,
+        )
 
     rewritten = (
         _inject_filter(sql, decision.injected_filter_sql)
@@ -100,7 +109,7 @@ def run_sql_query(
         return _record_error(
             con, query_id, identity, rewritten,
             f"execution error: {e}", started_ns,
-            nl_prompt=nl_prompt,
+            nl_prompt=nl_prompt, source_id=source_id,
         )
 
     duration_ms = (time.monotonic_ns() - started_ns) // 1_000_000
@@ -110,6 +119,7 @@ def run_sql_query(
         nl_prompt=nl_prompt, generated_sql=rewritten,
         status="ok", deny_reason=None,
         row_count=len(rows), duration_ms=duration_ms,
+        source_id=source_id,
     )
     return QueryResult(
         query_id=query_id,
@@ -216,6 +226,7 @@ def _record_denied(
     started_ns: int,
     *,
     nl_prompt: str | None = None,
+    source_id: str | None = None,
 ) -> QueryResult:
     duration_ms = (time.monotonic_ns() - started_ns) // 1_000_000
     deny_reason_str: str | None
@@ -231,6 +242,7 @@ def _record_denied(
         nl_prompt=nl_prompt, generated_sql=sql,
         status="denied", deny_reason=deny_reason_str,
         row_count=None, duration_ms=duration_ms,
+        source_id=source_id,
     )
     return QueryResult(
         query_id=query_id,
@@ -255,6 +267,7 @@ def _record_error(
     started_ns: int,
     *,
     nl_prompt: str | None = None,
+    source_id: str | None = None,
 ) -> QueryResult:
     duration_ms = (time.monotonic_ns() - started_ns) // 1_000_000
     _write_query_log(
@@ -263,6 +276,7 @@ def _record_error(
         nl_prompt=nl_prompt, generated_sql=sql,
         status="error", deny_reason=None,
         row_count=None, duration_ms=duration_ms,
+        source_id=source_id,
     )
     return QueryResult(
         query_id=query_id,
@@ -289,7 +303,14 @@ def _write_query_log(
     deny_reason: str | None,
     row_count: int | None,
     duration_ms: int,
+    source_id: str | None = None,
 ) -> None:
+    # Redact literals adjacent to sensitive columns BEFORE persistence.
+    # source_id is None on the parse-failure path; redact_audit_payload
+    # falls back to a global sensitive-column lookup (over-redacts).
+    generated_sql, nl_prompt = redact_audit_payload(
+        con, source_id, generated_sql, nl_prompt
+    )
     con.execute(
         "INSERT INTO rumi_query_log "
         "(query_id, user_id, role_id, nl_prompt, generated_sql, "

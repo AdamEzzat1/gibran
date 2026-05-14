@@ -24,6 +24,7 @@ from rumi.dsl.compile import Catalog, CompileError, compile_intent
 from rumi.dsl.types import QueryIntent
 from rumi.dsl.validate import IntentValidationError, validate_intent
 from rumi.execution.sql import QueryResult, run_sql_query
+from rumi.governance.redaction import redact_audit_payload
 from rumi.governance.types import GovernanceAPI, IdentityContext
 
 
@@ -57,6 +58,7 @@ def run_dsl_query(
         return _pre_compile_failure(
             con, identity, intent_json, started_ns,
             stage="parsed", reason=f"intent_parse: {e}",
+            raw_intent=raw_intent,
         )
 
     # Look up AllowedSchema for the intent's source
@@ -66,6 +68,7 @@ def run_dsl_query(
         return _pre_compile_failure(
             con, identity, intent_json, started_ns,
             stage="parsed", reason=f"unknown_source: {e}",
+            raw_intent=raw_intent,
         )
 
     # Semantic validation against AllowedSchema. Pass `con` so primitive-
@@ -77,6 +80,7 @@ def run_dsl_query(
         return _pre_compile_failure(
             con, identity, intent_json, started_ns,
             stage="validated", reason=f"intent_invalid: {e}",
+            raw_intent=raw_intent,
         )
 
     # Compile to SQL
@@ -87,6 +91,7 @@ def run_dsl_query(
         return _pre_compile_failure(
             con, identity, intent_json, started_ns,
             stage="compiled", reason=f"compile_failed: {e}",
+            raw_intent=raw_intent,
         )
 
     # Hand off to execution. Pass intent_json as nl_prompt for audit traceability.
@@ -109,9 +114,21 @@ def _pre_compile_failure(
     *,
     stage: Literal["parsed", "validated", "compiled"],
     reason: str,
+    raw_intent: dict[str, Any] | None = None,
 ) -> DSLRunResult:
     query_id = str(uuid.uuid4())
     duration_ms = (time.monotonic_ns() - started_ns) // 1_000_000
+    # Redact literals in the intent JSON before audit-log persistence --
+    # filter values for sensitive columns must not re-leak via nl_prompt.
+    # We try to pull source from the raw intent (even on Pydantic failure
+    # it might be present); if absent or non-string, fall back to a
+    # global sensitive-column lookup.
+    raw_source = None
+    if isinstance(raw_intent, dict):
+        candidate = raw_intent.get("source")
+        if isinstance(candidate, str):
+            raw_source = candidate
+    _, redacted_intent = redact_audit_payload(con, raw_source, "", intent_json)
     con.execute(
         "INSERT INTO rumi_query_log "
         "(query_id, user_id, role_id, nl_prompt, generated_sql, status, "
@@ -119,7 +136,7 @@ def _pre_compile_failure(
         "VALUES (?, ?, ?, ?, ?, 'error', ?, NULL, ?)",
         [
             query_id, identity.user_id, identity.role_id,
-            intent_json, "",            # no SQL was generated
+            redacted_intent, "",          # no SQL was generated
             reason, duration_ms,
         ],
     )
