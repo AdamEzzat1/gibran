@@ -186,6 +186,19 @@ def _validate_cross_entity(cfg: GibranConfig) -> dict[str, frozenset[str]]:
                     )
     _detect_cycles(deps)
 
+    # Materialized-metric cross-entity check: every dim_id listed in
+    # `materialized` must be a real dimension on the metric's source.
+    for m in cfg.metrics:
+        if m.materialized is None:
+            continue
+        src_dims = dims_by_source.get(m.source, {})
+        for dim_id in m.materialized:
+            if dim_id not in src_dims:
+                raise ConfigValidationError(
+                    f"metric {m.id!r}: materialized dimension {dim_id!r} "
+                    f"not defined on source {m.source!r}"
+                )
+
     for p in cfg.policies:
         _validate_policy(p, role_ids, source_ids, columns_by_source)
 

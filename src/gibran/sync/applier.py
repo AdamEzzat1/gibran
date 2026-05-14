@@ -68,7 +68,103 @@ def apply(con: duckdb.DuckDBPyConnection, validated: ValidatedConfig) -> dict[st
     except Exception:
         con.execute("ROLLBACK")
         raise
+
+    # Materialize any metrics that opted in via `materialized: [...]`.
+    # Done OUTSIDE the catalog transaction because the CREATE OR REPLACE
+    # TABLE statements have their own implicit transactions in DuckDB and
+    # can't be batched with the catalog DDL. A failed materialize is
+    # logged but does not roll back the catalog -- the cached/non-
+    # materialized fallback in the compiler keeps queries working.
+    _materialize_metrics(con, cfg.metrics)
+
+    # Bump the catalog generation token so any in-process plan cache
+    # entries from the previous catalog state become stale on next
+    # lookup. Done OUTSIDE the transaction so a failed apply doesn't
+    # silently leave the token bumped.
+    from gibran.dsl.plan_cache import bump_catalog_generation
+    bump_catalog_generation(con)
+
     return counts
+
+
+def _materialize_metrics(
+    con: duckdb.DuckDBPyConnection, metrics: list[MetricConfig]
+) -> None:
+    """For each metric with `materialized: [dim_ids...]`, build and run
+    a `CREATE OR REPLACE TABLE gibran_mat_<metric_id> AS SELECT ...`
+    statement. Best-effort: errors are caught and reported on stderr,
+    but the sync continues so a misconfigured materialization doesn't
+    poison the whole catalog."""
+    from gibran._source_dispatch import build_from_clause, SourceDispatchError
+    from gibran._sql import qident
+    import sys
+
+    for m in metrics:
+        if m.materialized is None:
+            continue
+        try:
+            source_row = con.execute(
+                "SELECT source_type, uri FROM gibran_sources WHERE source_id = ?",
+                [m.source],
+            ).fetchone()
+            if source_row is None:
+                continue
+            source_type, uri = source_row
+            from_clause = build_from_clause(source_type, uri)
+
+            # Resolve each dim_id to its (column_name, dim_type) so we
+            # can emit DATE_TRUNC for temporal dims at the appropriate
+            # grain. V1: dims materialize at their base grain (no DATE_TRUNC
+            # applied here -- the compiler does the date-truncation when
+            # routing a query that asks for a coarser grain).
+            dim_columns: list[tuple[str, str]] = []
+            for dim_id in m.materialized:
+                dim_row = con.execute(
+                    "SELECT column_name FROM gibran_dimensions WHERE dimension_id = ?",
+                    [dim_id],
+                ).fetchone()
+                if dim_row is None:
+                    raise ValueError(
+                        f"materialized dimension {dim_id!r} not found in catalog"
+                    )
+                dim_columns.append((dim_id, dim_row[0]))
+
+            # Build the SELECT. Materializing the metric expression
+            # in-place (e.g. SUM(amount)) since we only allow direct
+            # aggregates here.
+            metric_expr = _render_expression(m)
+            if m.filter:
+                metric_expr = f"{metric_expr} FILTER (WHERE {m.filter})"
+
+            mat_table = f"gibran_mat_{m.id}"
+            if not dim_columns:
+                # Scalar materialization: single row, just the metric value.
+                create_sql = (
+                    f"CREATE OR REPLACE TABLE {qident(mat_table)} AS\n"
+                    f"SELECT {metric_expr} AS {qident(m.id)}\n"
+                    f"FROM {from_clause}"
+                )
+            else:
+                select_parts = [
+                    f"{qident(col)} AS {qident(dim_id)}"
+                    for dim_id, col in dim_columns
+                ]
+                select_parts.append(f"{metric_expr} AS {qident(m.id)}")
+                group_by = ", ".join(
+                    str(i + 1) for i in range(len(dim_columns))
+                )
+                create_sql = (
+                    f"CREATE OR REPLACE TABLE {qident(mat_table)} AS\n"
+                    f"SELECT " + ", ".join(select_parts) + "\n"
+                    f"FROM {from_clause}\n"
+                    f"GROUP BY {group_by}"
+                )
+            con.execute(create_sql)
+        except (SourceDispatchError, Exception) as e:
+            print(
+                f"warning: failed to materialize {m.id!r}: {e}",
+                file=sys.stderr,
+            )
 
 
 def _upsert_source(con: duckdb.DuckDBPyConnection, s: SourceConfig) -> None:
@@ -191,37 +287,42 @@ def _ensure_metric_version(con: duckdb.DuckDBPyConnection, m: MetricConfig) -> N
 
 def _render_metric_config(m: MetricConfig) -> str | None:
     """Pack primitive-specific config into a JSON blob, or None for shapes
-    that need no extra config beyond `expression`."""
+    that need no extra config beyond `expression`. Materialization config
+    (when set) is merged into whichever per-type blob applies, so the
+    compiler can route on it uniformly."""
+    cfg: dict[str, object] = {}
     if m.type == "period_over_period":
-        return json.dumps({
+        cfg.update({
             "base_metric": m.base_metric,
             "period_dim": m.period_dim,
             "period_unit": m.period_unit,
             "comparison": m.comparison,
         })
-    if m.type == "cohort_retention":
-        return json.dumps({
+    elif m.type == "cohort_retention":
+        cfg.update({
             "entity_column": m.entity_column,
             "event_column": m.event_column,
             "cohort_grain": m.cohort_grain,
             "retention_grain": m.retention_grain,
             "max_periods": m.max_periods,
         })
-    if m.type == "funnel":
-        return json.dumps({
+    elif m.type == "funnel":
+        cfg.update({
             "entity_column": m.funnel_entity_column,
             "event_order_column": m.funnel_event_order_column,
             "steps": m.funnel_steps,
         })
-    if m.type == "multi_stage_filter":
-        return json.dumps({
+    elif m.type == "multi_stage_filter":
+        cfg.update({
             "entity_column": m.msf_entity_column,
             "ranking_expression": m.msf_ranking_expression,
             "result_expression": m.msf_result_expression,
             "top_n": m.top_n,
             "top_percentile": m.top_percentile,
         })
-    return None
+    if m.materialized is not None:
+        cfg["materialized"] = list(m.materialized)
+    return json.dumps(cfg) if cfg else None
 
 
 def _render_expression(m: MetricConfig) -> str:

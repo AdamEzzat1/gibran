@@ -193,6 +193,22 @@ def compile_intent(intent: QueryIntent, catalog: Catalog) -> CompiledQuery:
 
     metric_metas = [catalog.get_metric(m) for m in intent.metrics]
 
+    # Materialized-metric short-circuit. If the intent is exactly a
+    # single materialized metric grouped by its materialized dimensions,
+    # route to `gibran_mat_<metric_id>` instead of re-scanning the
+    # source. V1 conditions are strict so the cache hit is safe; falling
+    # through to the normal compile path is always correct.
+    if (
+        len(metric_metas) == 1
+        and metric_metas[0].metric_config
+        and isinstance(metric_metas[0].metric_config.get("materialized"), list)
+        and not intent.filters and not intent.having and not intent.order_by
+    ):
+        mat_dims = list(metric_metas[0].metric_config["materialized"])
+        intent_dim_ids = [d.id for d in intent.dimensions]
+        if mat_dims == intent_dim_ids and all(d.grain is None for d in intent.dimensions):
+            return _build_materialized_select(metric_metas[0], intent)
+
     # Shape-primitives short-circuit: cohort_retention, funnel, and
     # multi_stage_filter are whole-query primitives that emit a fixed
     # column shape via CTEs. They cannot be combined with other metrics
@@ -688,6 +704,44 @@ def _build_funnel(
     )
 
     return CompiledQuery(ctes=tuple(ctes), main_sql=main_sql)
+
+
+# ---------------------------------------------------------------------------
+# Materialized-metric routing
+# ---------------------------------------------------------------------------
+
+def _build_materialized_select(
+    meta: _MetricMeta, intent: QueryIntent
+) -> CompiledQuery:
+    """Emit a SELECT against the metric's pre-aggregated `gibran_mat_*`
+    table. The materialized table already has columns aliased to the
+    dimension ids and the metric id, so the projection is a simple
+    pass-through of those names."""
+    table = qident(f"gibran_mat_{meta.metric_id}")
+    select_parts: list[str] = []
+    group_by_positions: list[int] = []
+    for i, dim in enumerate(intent.dimensions, start=1):
+        select_parts.append(qident(dim.id))
+        group_by_positions.append(i)
+    # When dimensions are present, the materialized table already has
+    # one row per dim tuple, so no GROUP BY is needed on the route.
+    # We project the metric column directly.
+    select_parts.append(qident(meta.metric_id))
+
+    select_clause = "SELECT " + ", ".join(select_parts)
+    order_by_clause = ""
+    if intent.dimensions:
+        order_by_clause = "\nORDER BY " + ", ".join(
+            qident(d.id) for d in intent.dimensions
+        )
+    limit_clause = f"\nLIMIT {intent.limit}"
+    main_sql = (
+        select_clause
+        + f"\nFROM {table}"
+        + order_by_clause
+        + limit_clause
+    )
+    return CompiledQuery(ctes=(), main_sql=main_sql)
 
 
 # ---------------------------------------------------------------------------

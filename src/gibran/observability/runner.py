@@ -111,6 +111,13 @@ def run_checks(
     # Refresh the source health cache to reflect the runs we just recorded.
     observability.refresh_health(source_id)
 
+    # Bump the source-health generation token so any in-process result
+    # cache entries based on the prior health state become stale on
+    # next lookup. (The result cache reads both catalog_generation and
+    # source_health_generation; bumping either invalidates.)
+    from gibran.execution.result_cache import bump_source_health_generation
+    bump_source_health_generation(con)
+
     # Fire any configured webhooks for block-severity failures. Done AFTER
     # record_run so an alerting outage doesn't lose the run record. Each
     # POST is best-effort -- failures are caught and silently dropped so

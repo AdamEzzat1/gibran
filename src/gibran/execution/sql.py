@@ -111,16 +111,35 @@ def run_sql_query(
         except Exception:
             pass  # older DuckDB; honor on a best-effort basis
 
-    try:
-        cur = con.execute(rewritten)
-        rows = cur.fetchall()
-        col_names = [d[0] for d in cur.description] if cur.description else []
-    except Exception as e:
-        return _record_error(
-            con, query_id, identity, rewritten,
-            f"execution error: {e}", started_ns,
-            nl_prompt=nl_prompt, source_id=source_id,
-        )
+    # Result-cache lookup. Audit-log row is STILL written on a cache hit
+    # (we just skip the DuckDB execute). Set GIBRAN_DISABLE_RESULT_CACHE=1
+    # to bypass caching for callers that need fresh-execute every time.
+    from gibran.execution.result_cache import lookup as _cache_lookup, store as _cache_store, CachedResult
+    import os as _os
+    use_cache = _os.environ.get("GIBRAN_DISABLE_RESULT_CACHE", "") != "1"
+    cache_key = None
+    cached = None
+    if use_cache:
+        cache_key, cached = _cache_lookup(con, rewritten, identity)
+
+    if cached is not None:
+        rows = list(cached.rows)
+        col_names = list(cached.columns)
+    else:
+        try:
+            cur = con.execute(rewritten)
+            rows = cur.fetchall()
+            col_names = [d[0] for d in cur.description] if cur.description else []
+        except Exception as e:
+            return _record_error(
+                con, query_id, identity, rewritten,
+                f"execution error: {e}", started_ns,
+                nl_prompt=nl_prompt, source_id=source_id,
+            )
+        if use_cache and cache_key is not None:
+            _cache_store(cache_key, CachedResult(
+                rows=tuple(rows), columns=tuple(col_names),
+            ))
 
     duration_ms = (time.monotonic_ns() - started_ns) // 1_000_000
     _write_query_log(

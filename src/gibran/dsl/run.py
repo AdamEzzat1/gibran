@@ -21,6 +21,7 @@ import duckdb
 from pydantic import ValidationError
 
 from gibran.dsl.compile import Catalog, CompileError, compile_intent
+from gibran.dsl.plan_cache import compile_intent_cached
 from gibran.dsl.types import QueryIntent
 from gibran.dsl.validate import IntentValidationError, validate_intent
 from gibran.execution.sql import QueryResult, run_sql_query
@@ -83,10 +84,16 @@ def run_dsl_query(
             raw_intent=raw_intent,
         )
 
-    # Compile to SQL
+    # Compile to SQL. compile_intent_cached short-circuits when the same
+    # intent has been compiled before AND the catalog hasn't been re-synced
+    # since. The cache is per-process; opt out via the env var if needed.
     catalog = Catalog(con)
+    import os as _os
     try:
-        sql = compile_intent(intent, catalog).render()
+        if _os.environ.get("GIBRAN_DISABLE_PLAN_CACHE", "") == "1":
+            sql = compile_intent(intent, catalog).render()
+        else:
+            sql = compile_intent_cached(intent, catalog).render()
     except CompileError as e:
         return _pre_compile_failure(
             con, identity, intent_json, started_ns,

@@ -72,6 +72,38 @@ class MetricConfig(_Strict):
     unit: str | None = None
     description: str | None = None
     owner: str | None = None
+    # Materialization: list of dimension_ids to pre-aggregate at.
+    # When set, `gibran sync` creates a `gibran_mat_<metric_id>` table
+    # populated with (dim_cols..., metric_value). Queries that match
+    # the materialized shape (single metric + exact dim list) route to
+    # the pre-aggregated table instead of re-scanning the source.
+    # NULL/omitted = no materialization. Empty list = scalar
+    # materialization (the metric value over the whole source, no
+    # grouping). Validated below + by loader.
+    materialized: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _check_materialized_compat(self) -> "MetricConfig":
+        if self.materialized is None:
+            return self
+        # V1 restriction: only simple aggregates can be materialized.
+        # Shape primitives (cohort/funnel/multi_stage_filter) have
+        # multi-column outputs that don't fit the (dim_cols, value) shape.
+        # ratio / expression have template references that we'd need to
+        # resolve at sync time -- deferrable.
+        incompatible = {
+            "cohort_retention", "funnel", "multi_stage_filter",
+            "ratio", "expression", "rolling_window", "period_over_period",
+        }
+        if self.type in incompatible:
+            raise ValueError(
+                f"metric {self.id!r}: type {self.type!r} cannot be "
+                f"materialized in V1 (only direct aggregates: count / "
+                f"sum / avg / min / max / percentile / count_distinct / "
+                f"count_distinct_approx / stddev_samp / stddev_pop / mode "
+                f"/ weighted_avg)"
+            )
+        return self
 
     # percentile-specific
     column: str | None = None
