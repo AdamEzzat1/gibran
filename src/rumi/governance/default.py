@@ -64,7 +64,21 @@ class DefaultGovernance:
                 fixed_constraints=(),
                 cache_version=(source_schema_version, 0),
             )
-        policy_id, _row_filter_json, default_mode, policy_schema_version = policy_row
+        (
+            policy_id, _row_filter_json, default_mode, policy_schema_version,
+            _valid_until, expired,
+        ) = policy_row
+        # Expired policy -> same view as "no policy": nothing visible. The
+        # AllowedSchema must not leak schema names a non-permitted role
+        # could probe.
+        if expired:
+            return AllowedSchema(
+                source_id=source_id,
+                source_display_name=source_display_name,
+                columns=(), dimensions=(), metrics=(),
+                fixed_constraints=(),
+                cache_version=(source_schema_version, 0),
+            )
 
         allowed = self._compute_allowed_columns(source_id, policy_id, default_mode)
         columns = self._build_column_views(source_id, allowed)
@@ -104,7 +118,19 @@ class DefaultGovernance:
                 f"role={identity.role_id} source={source_id}",
                 column_allowlist=frozenset(),
             )
-        policy_id, row_filter_json, default_mode, _policy_schema_version = policy_row
+        (
+            policy_id, row_filter_json, default_mode, _policy_schema_version,
+            valid_until, expired,
+        ) = policy_row
+        # Expired policies fail BEFORE quality/freshness consultation -- an
+        # expired grant means the user has no access regardless of source
+        # health, so don't pay the obs round-trip to learn that.
+        if expired:
+            return _deny(
+                DenyReason.POLICY_EXPIRED,
+                f"valid_until={valid_until.isoformat()}",
+                column_allowlist=frozenset(),
+            )
 
         allowed = self._compute_allowed_columns(source_id, policy_id, default_mode)
 
@@ -196,8 +222,14 @@ class DefaultGovernance:
     # internal helpers
     # ------------------------------------------------------------------
     def _fetch_policy(self, role_id: str, source_id: str):
+        # `expired` is computed inside SQL so the comparison uses DuckDB's
+        # clock -- matches the precedent set by latest_blocking_failures
+        # for staleness (mixing Python wall-clock with DB CURRENT_TIMESTAMP
+        # produces UTC-offset drift on local-time installs).
         return self.con.execute(
-            "SELECT policy_id, row_filter_ast, default_column_mode, schema_version "
+            "SELECT policy_id, row_filter_ast, default_column_mode, schema_version, "
+            "valid_until, "
+            "(valid_until IS NOT NULL AND valid_until < CURRENT_TIMESTAMP) AS expired "
             "FROM rumi_policies WHERE role_id = ? AND source_id = ?",
             [role_id, source_id],
         ).fetchone()

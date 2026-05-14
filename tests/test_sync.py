@@ -206,6 +206,70 @@ class TestGovernanceEntities:
             ("order_id", True),
         ]
 
+    def test_policy_valid_until_defaults_to_null(self) -> None:
+        # The fixture YAML doesn't set valid_until on any policy.
+        con = _migrated_db()
+        apply_config(con, load_config(FIXTURES / "rumi.yaml"))
+        rows = con.execute(
+            "SELECT policy_id, valid_until FROM rumi_policies ORDER BY policy_id"
+        ).fetchall()
+        for _policy_id, valid_until in rows:
+            assert valid_until is None
+
+    def test_policy_valid_until_round_trips(self, tmp_path: Path) -> None:
+        # Author a YAML with one valid_until-bearing policy and confirm it
+        # round-trips into rumi_policies as a naive datetime.
+        from datetime import datetime
+
+        con = _migrated_db()
+        yaml_path = tmp_path / "rumi.yaml"
+        yaml_path.write_text(
+            (FIXTURES / "rumi.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        text = yaml_path.read_text(encoding="utf-8")
+        # Inject valid_until on the analyst_west_orders policy.
+        text = text.replace(
+            "    default_column_mode: allow\n    row_filter:",
+            "    default_column_mode: allow\n"
+            "    valid_until: '2027-01-01T00:00:00'\n"
+            "    row_filter:",
+        )
+        yaml_path.write_text(text, encoding="utf-8")
+        apply_config(con, load_config(yaml_path))
+
+        stored = con.execute(
+            "SELECT valid_until FROM rumi_policies WHERE policy_id = 'analyst_west_orders'"
+        ).fetchone()[0]
+        assert stored == datetime(2027, 1, 1, 0, 0, 0)
+
+    def test_policy_valid_until_resync_no_spurious_update(self, tmp_path: Path) -> None:
+        # Re-applying the same config (including a tz-aware valid_until) must
+        # not flap the row. We normalize tz-aware to naive UTC at write time
+        # so the change-detection tuple round-trips equal.
+        con = _migrated_db()
+        yaml_path = tmp_path / "rumi.yaml"
+        yaml_path.write_text(
+            (FIXTURES / "rumi.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        text = yaml_path.read_text(encoding="utf-8").replace(
+            "    default_column_mode: allow\n    row_filter:",
+            "    default_column_mode: allow\n"
+            "    valid_until: '2027-01-01T00:00:00Z'\n"
+            "    row_filter:",
+        )
+        yaml_path.write_text(text, encoding="utf-8")
+        apply_config(con, load_config(yaml_path))
+        first = con.execute(
+            "SELECT valid_until FROM rumi_policies WHERE policy_id = 'analyst_west_orders'"
+        ).fetchone()[0]
+        # Re-apply -- value should be identical, no UPDATE needed.
+        apply_config(con, load_config(yaml_path))
+        second = con.execute(
+            "SELECT valid_until FROM rumi_policies WHERE policy_id = 'analyst_west_orders'"
+        ).fetchone()[0]
+        assert first == second
+        assert first.tzinfo is None  # stored as naive UTC
+
     def test_quality_rules_resolve_cost_class_by_type(self) -> None:
         con = _migrated_db()
         apply_config(con, load_config(FIXTURES / "rumi.yaml"))

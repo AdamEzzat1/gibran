@@ -7,6 +7,7 @@ are field-local by design.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -174,6 +175,11 @@ class PolicyConfig(_Strict):
     default_column_mode: Literal["allow", "deny"] = "deny"
     column_overrides: dict[str, Literal["allow", "deny"]] = Field(default_factory=dict)
     row_filter: dict[str, Any] | None = None
+    # Time-bound grants (contractors, consultants, temporary credentials).
+    # NULL/omitted = "never expires". Compared against DuckDB's
+    # CURRENT_TIMESTAMP at evaluate-time; the applier normalizes tz-aware
+    # values to naive UTC so round-trip equality holds on re-sync.
+    valid_until: datetime | None = None
 
 
 class QualityRuleConfig(_Strict):

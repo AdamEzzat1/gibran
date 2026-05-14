@@ -8,6 +8,7 @@ governance entities."""
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import duckdb
 
@@ -283,24 +284,26 @@ def _upsert_role(con: duckdb.DuckDBPyConnection, r: RoleConfig) -> None:
 
 def _upsert_policy(con: duckdb.DuckDBPyConnection, p: PolicyConfig) -> None:
     row_filter_json = json.dumps(p.row_filter) if p.row_filter is not None else None
+    valid_until = _normalize_valid_until(p.valid_until)
     existing = con.execute(
-        "SELECT role_id, source_id, row_filter_ast, default_column_mode "
+        "SELECT role_id, source_id, row_filter_ast, default_column_mode, valid_until "
         "FROM rumi_policies WHERE policy_id = ?",
         [p.id],
     ).fetchone()
     if existing is None:
         con.execute(
             "INSERT INTO rumi_policies "
-            "(policy_id, role_id, source_id, row_filter_ast, default_column_mode) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [p.id, p.role, p.source, row_filter_json, p.default_column_mode],
+            "(policy_id, role_id, source_id, row_filter_ast, default_column_mode, valid_until) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [p.id, p.role, p.source, row_filter_json, p.default_column_mode, valid_until],
         )
     else:
-        new_values = (p.role, p.source, row_filter_json, p.default_column_mode)
+        new_values = (p.role, p.source, row_filter_json, p.default_column_mode, valid_until)
         if existing != new_values:
             con.execute(
                 "UPDATE rumi_policies SET "
-                "role_id = ?, source_id = ?, row_filter_ast = ?, default_column_mode = ? "
+                "role_id = ?, source_id = ?, row_filter_ast = ?, default_column_mode = ?, "
+                "valid_until = ? "
                 "WHERE policy_id = ?",
                 [*new_values, p.id],
             )
@@ -311,6 +314,16 @@ def _upsert_policy(con: duckdb.DuckDBPyConnection, p: PolicyConfig) -> None:
             "VALUES (?, ?, ?)",
             [p.id, col, mode == "allow"],
         )
+
+
+def _normalize_valid_until(dt: datetime | None) -> datetime | None:
+    # DuckDB's TIMESTAMP is naive (no tzinfo). If the YAML supplies a tz-aware
+    # datetime, convert to UTC and strip the tz so the value round-trips back
+    # equal on re-sync (otherwise the change-detection tuple would mismatch
+    # every time and force an UPDATE).
+    if dt is None or dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _replace_all_quality_rules(

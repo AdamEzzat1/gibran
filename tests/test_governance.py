@@ -1,4 +1,5 @@
 """End-to-end DefaultGovernance tests against a fully-synced fixture catalog."""
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -366,3 +367,100 @@ class TestEvaluateWithObservability:
             (),
         )
         assert decision.allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Time-bound policies (valid_until)
+# ---------------------------------------------------------------------------
+
+class TestTimeBoundPolicies:
+    """Policies with `valid_until` deny once the timestamp is in the past.
+
+    The expiry comparison happens in DuckDB (CURRENT_TIMESTAMP) inside
+    _fetch_policy, not in Python. These tests overwrite the analyst_west
+    policy's valid_until directly to avoid making the fixture YAML
+    flaky-by-time.
+    """
+
+    def _set_valid_until(self, con: duckdb.DuckDBPyConnection, dt: datetime | None) -> None:
+        con.execute(
+            "UPDATE rumi_policies SET valid_until = ? WHERE policy_id = 'analyst_west_orders'",
+            [dt],
+        )
+
+    def test_future_valid_until_still_allows(self) -> None:
+        con = _populated_db()
+        self._set_valid_until(con, datetime.now() + timedelta(days=365))
+        gov = DefaultGovernance(con)
+        decision = gov.evaluate(
+            _ident("analyst_west", region="west"),
+            frozenset({"orders"}),
+            frozenset({"amount"}),
+            (),
+        )
+        assert decision.allowed is True
+
+    def test_past_valid_until_denies_with_expired_reason(self) -> None:
+        con = _populated_db()
+        expired_at = datetime.now() - timedelta(days=1)
+        self._set_valid_until(con, expired_at)
+        gov = DefaultGovernance(con)
+        decision = gov.evaluate(
+            _ident("analyst_west", region="west"),
+            frozenset({"orders"}),
+            frozenset({"amount"}),
+            (),
+        )
+        assert decision.allowed is False
+        assert decision.deny_reason is DenyReason.POLICY_EXPIRED
+        # detail carries the ISO timestamp so audit-log readers can see WHEN
+        assert decision.deny_detail is not None
+        assert "valid_until=" in decision.deny_detail
+        # column_allowlist is empty -- expired = no access at all
+        assert decision.column_allowlist == frozenset()
+
+    def test_null_valid_until_means_never_expires(self) -> None:
+        # The fixture policy ships with valid_until NULL; explicit baseline.
+        con = _populated_db()
+        valid_until = con.execute(
+            "SELECT valid_until FROM rumi_policies WHERE policy_id = 'analyst_west_orders'"
+        ).fetchone()[0]
+        assert valid_until is None
+        gov = DefaultGovernance(con)
+        decision = gov.evaluate(
+            _ident("analyst_west", region="west"),
+            frozenset({"orders"}),
+            frozenset({"amount"}),
+            (),
+        )
+        assert decision.allowed is True
+
+    def test_preview_schema_for_expired_policy_returns_empty(self) -> None:
+        # Expired policy must not leak the schema -- same surface as "no policy".
+        con = _populated_db()
+        self._set_valid_until(con, datetime.now() - timedelta(seconds=1))
+        gov = DefaultGovernance(con)
+        schema = gov.preview_schema(_ident("analyst_west", region="west"), "orders")
+        assert schema.columns == ()
+        assert schema.dimensions == ()
+        assert schema.metrics == ()
+
+    def test_expired_denies_before_observability_consultation(self) -> None:
+        # If observability would also block, the expired-policy denial must
+        # win -- it's cheaper AND it's correct (expired = no access regardless
+        # of source health).
+        con = _populated_db()
+        self._set_valid_until(con, datetime.now() - timedelta(days=1))
+        obs = DefaultObservability(con)
+        # Record a failing quality run so observability *would* also deny
+        obs.record_run("orders_amount_not_null", "quality", False)
+        gov = DefaultGovernance(con, observability=obs)
+        decision = gov.evaluate(
+            _ident("analyst_west", region="west"),
+            frozenset({"orders"}),
+            frozenset({"amount"}),
+            (),
+        )
+        assert decision.deny_reason is DenyReason.POLICY_EXPIRED
+        # quality_holds should be empty -- obs was never consulted
+        assert decision.quality_holds == ()

@@ -37,6 +37,7 @@ class DenyReason(str, Enum):
     METRIC_DENIED     = "policy:no_metric_access"
     AST_INVALID       = "policy:ast_invalid"
     ATTRIBUTE_MISSING = "policy:attribute_unresolved"
+    POLICY_EXPIRED    = "policy:expired"
     QUALITY_BLOCK     = "quality:rule_failed"
     FRESHNESS_BLOCK   = "freshness:rule_failed"
 
