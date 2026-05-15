@@ -40,10 +40,24 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 
+from typing import Union
+
 import duckdb
 
 from gibran.dsl.plan_cache import catalog_generation
+from gibran.execution.dialect import active_dialect
+from gibran.execution.engine import DuckDBEngine, ExecutionEngine
 from gibran.governance.types import IdentityContext
+
+
+ConnectionOrEngine = Union[duckdb.DuckDBPyConnection, ExecutionEngine]
+
+
+def _as_engine(target: ConnectionOrEngine) -> ExecutionEngine:
+    """Normalize either a raw connection or an engine into an engine."""
+    if hasattr(target, "dialect") and hasattr(target, "execute"):
+        return target  # type: ignore[return-value]
+    return DuckDBEngine(target)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -52,39 +66,46 @@ class CachedResult:
     columns: tuple[str, ...]
 
 
-def _ensure_meta_table(con: duckdb.DuckDBPyConnection) -> None:
-    con.execute(
+def _ensure_meta_table(engine: ExecutionEngine) -> None:
+    engine.execute(
         "CREATE TABLE IF NOT EXISTS gibran_meta ("
         "  key TEXT PRIMARY KEY, value TEXT NOT NULL"
         ")"
     )
 
 
-def source_health_generation(con: duckdb.DuckDBPyConnection) -> str:
+def source_health_generation(target: ConnectionOrEngine) -> str:
     """Read the source-health generation token. Bumps each time
-    `gibran check` records new runs (set by the check runner)."""
-    _ensure_meta_table(con)
-    row = con.execute(
+    `gibran check` records new runs (set by the check runner).
+
+    Accepts a raw DuckDBPyConnection (backward compat) or an
+    ExecutionEngine -- Phase 5A.1c migration so PostgresEngine can
+    participate in result-cache invalidation."""
+    engine = _as_engine(target)
+    _ensure_meta_table(engine)
+    row = engine.fetchone(
         "SELECT value FROM gibran_meta WHERE key = 'source_health_generation'"
-    ).fetchone()
+    )
     if row is None:
         return "0"
     return str(row[0])
 
 
-def bump_source_health_generation(con: duckdb.DuckDBPyConnection) -> str:
+def bump_source_health_generation(target: ConnectionOrEngine) -> str:
     """Called by `run_checks` after a check pass. Invalidates the result
     cache so the next query re-evaluates against the new health state."""
     import uuid as _uuid
 
-    _ensure_meta_table(con)
+    engine = _as_engine(target)
+    _ensure_meta_table(engine)
     new_gen = _uuid.uuid4().hex
-    con.execute(
+    engine.execute(
         "INSERT INTO gibran_meta (key, value) "
         "VALUES ('source_health_generation', ?) "
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
         [new_gen],
     )
+    engine.commit()
     return new_gen
 
 
@@ -135,8 +156,16 @@ def cache_key(
     identity: IdentityContext,
     catalog_gen: str,
     health_gen: str,
+    dialect: str | None = None,
 ) -> str:
-    """Stable hash key combining all the inputs that change result rows."""
+    """Stable hash key combining all the inputs that change result rows.
+
+    The dialect is included so that when 5A.2+ adds Postgres / Snowflake /
+    BigQuery engines, the same SQL string compiled by different engines
+    can't collide in the cache. Today DuckDB is the only engine, so the
+    key is effectively identical to before; the dialect dimension is
+    additive.
+    """
     payload = {
         "sql": rewritten_sql,
         "u": identity.user_id,
@@ -144,12 +173,13 @@ def cache_key(
         "a": sorted((identity.attributes or {}).items()),
         "cg": catalog_gen,
         "hg": health_gen,
+        "d": dialect or active_dialect().value,
     }
     return json.dumps(payload, sort_keys=True, default=str)
 
 
 def lookup(
-    con: duckdb.DuckDBPyConnection,
+    target: ConnectionOrEngine,
     rewritten_sql: str,
     identity: IdentityContext,
     *,
@@ -157,13 +187,14 @@ def lookup(
 ) -> tuple[str, CachedResult | None]:
     """Look up a cached result. Returns (key, cached_value_or_None).
 
-    The caller is responsible for storing back on a miss via
-    `store(key, CachedResult(rows, columns), cache=...)`.
+    Accepts a raw DuckDBPyConnection (backward compat) or an
+    ExecutionEngine. The caller is responsible for storing back on a
+    miss via `store(key, CachedResult(rows, columns), cache=...)`.
     """
     if cache is None:
         cache = _DEFAULT_CACHE
-    cg = catalog_generation(con)
-    hg = source_health_generation(con)
+    cg = catalog_generation(target)
+    hg = source_health_generation(target)
     key = cache_key(rewritten_sql, identity, cg, hg)
     return key, cache.get(key)
 

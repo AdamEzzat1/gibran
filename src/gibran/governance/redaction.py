@@ -47,6 +47,8 @@ import duckdb
 import sqlglot
 from sqlglot import exp
 
+from gibran.execution.dialect import active_dialect
+
 
 REDACTED = "<redacted>"
 SENSITIVE_LEVELS = ("pii", "restricted")
@@ -106,8 +108,9 @@ def redact_sql_literals(sql: str, sensitive_columns: frozenset[str]) -> str:
     """
     if not sql or not sensitive_columns:
         return sql
+    dialect = active_dialect()
     try:
-        tree = sqlglot.parse_one(sql, dialect="duckdb")
+        tree = sqlglot.parse_one(sql, dialect=dialect)
     except Exception:
         return sql
 
@@ -128,7 +131,7 @@ def redact_sql_literals(sql: str, sensitive_columns: frozenset[str]) -> str:
             _redact_literals_in(between.args.get("low"))
             _redact_literals_in(between.args.get("high"))
 
-    return tree.sql(dialect="duckdb")
+    return tree.sql(dialect=dialect)
 
 
 def _is_sensitive_column(

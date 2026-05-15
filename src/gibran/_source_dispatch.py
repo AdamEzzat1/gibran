@@ -6,30 +6,35 @@ for `duckdb_table` and `sql_view` source types. For parquet/csv sources
 users had to manually `CREATE VIEW orders AS SELECT * FROM 'path.parquet'`
 before any `gibran check` or DSL query would work.
 
-This helper looks up the source's `source_type` + `uri` and returns the
-appropriate FROM-clause fragment:
+This helper looks up the source's `source_type` + `uri` and dispatches
+through the active `ExecutionEngine` for the FROM-clause fragment:
 
   duckdb_table  ->  "<uri>"                 (quoted identifier)
   sql_view      ->  "<uri>"                 (quoted identifier)
-  parquet       ->  read_parquet('<uri>')   (file-scan)
-  csv           ->  read_csv('<uri>')       (file-scan)
+  parquet       ->  read_parquet('<uri>')   (DuckDB file-scan)
+  csv           ->  read_csv('<uri>')       (DuckDB file-scan)
 
-The returned string is ready to drop into `FROM <here>` -- callers do not
-need to wrap it in additional quotes / parens.
+Phase 5A.1: the actual rendering moved into `DuckDBEngine.file_scan_sql`.
+This module now wraps the engine and preserves backward-compatible
+function signatures so existing callers (drift detector, applier,
+example_values, dsl/compile) don't need to change yet. 5A.1b migrates
+those callers to pass an engine directly.
 
-Used by both `observability/runner.py` (the quality + freshness rule
-evaluators) and `dsl/compile.py` (the FROM clause emitter), so the two
-paths share one mapping and can't diverge.
+`SourceDispatchError` is defined in `gibran.execution.engine` and
+re-exported here for backward compatibility -- existing imports of
+`from gibran._source_dispatch import SourceDispatchError` keep working.
 """
 from __future__ import annotations
 
 import duckdb
 
-from gibran._sql import qident, render_literal
+from gibran.execution.engine import DuckDBEngine, SourceDispatchError
 
-
-class SourceDispatchError(ValueError):
-    pass
+__all__ = [
+    "SourceDispatchError",
+    "build_from_clause",
+    "from_clause_for_source",
+]
 
 
 def from_clause_for_source(
@@ -53,29 +58,11 @@ def from_clause_for_source(
     if row is None:
         raise SourceDispatchError(f"unknown source: {source_id!r}")
     source_type, uri = row
-    return build_from_clause(source_type, uri)
+    return DuckDBEngine(con).file_scan_sql(source_type, uri)
 
 
 def build_from_clause(source_type: str, uri: str) -> str:
     """Pure-function form of from_clause_for_source: takes (source_type, uri)
     directly, without a DB lookup. Used by the drift detector at sync time
     where the source isn't in `gibran_sources` yet."""
-    return _build_from(source_type, uri)
-
-
-def _build_from(source_type: str, uri: str) -> str:
-    if source_type in ("duckdb_table", "sql_view"):
-        # For relational sources, the uri IS the relation name. Quote as an
-        # identifier (handles names with underscores, hyphens, mixed case).
-        return qident(uri)
-    if source_type == "parquet":
-        return f"read_parquet({render_literal(uri)})"
-    if source_type == "csv":
-        # `header=true, auto_detect=true` are DuckDB defaults; we let it
-        # infer types. Users with non-standard CSVs should register a
-        # `sql_view` source instead.
-        return f"read_csv({render_literal(uri)})"
-    raise SourceDispatchError(
-        f"unrecognized source_type {source_type!r} (expected one of "
-        f"duckdb_table / sql_view / parquet / csv)"
-    )
+    return DuckDBEngine().file_scan_sql(source_type, uri)

@@ -17,6 +17,15 @@ the end of a successful sync, which writes a fresh UUID into
 `gibran_meta`. The plan cache reads that UUID alongside the intent JSON
 so re-syncing the catalog never returns a stale compiled query.
 
+Phase 5A.1c
+-----------
+
+`catalog_generation` and `bump_catalog_generation` accept either a raw
+`DuckDBPyConnection` (backward-compat) OR an `ExecutionEngine`. Raw
+connections are wrapped in a DuckDBEngine internally so the function
+body has one code path. This is what lets the result cache (which calls
+into here) work end-to-end against PostgresEngine.
+
 Per-process scope
 -----------------
 
@@ -29,13 +38,25 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from collections import OrderedDict
-from typing import Any
+from typing import Any, Union
 
 import duckdb
 
 from gibran.dsl.compile import Catalog, CompiledQuery, compile_intent
 from gibran.dsl.types import QueryIntent
+from gibran.execution.engine import DuckDBEngine, ExecutionEngine
+
+
+ConnectionOrEngine = Union[duckdb.DuckDBPyConnection, ExecutionEngine]
+
+
+def _as_engine(target: ConnectionOrEngine) -> ExecutionEngine:
+    """Normalize either a raw connection or an engine into an engine."""
+    if hasattr(target, "dialect") and hasattr(target, "execute"):
+        return target  # type: ignore[return-value]
+    return DuckDBEngine(target)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -49,34 +70,38 @@ _META_TABLE_INIT = (
 )
 
 
-def _ensure_meta_table(con: duckdb.DuckDBPyConnection) -> None:
-    con.execute(_META_TABLE_INIT)
+def _ensure_meta_table(engine: ExecutionEngine) -> None:
+    engine.execute(_META_TABLE_INIT)
 
 
-def catalog_generation(con: duckdb.DuckDBPyConnection) -> str:
+def catalog_generation(target: ConnectionOrEngine) -> str:
     """Read the current catalog generation token. Used by the plan cache
-    to detect whether a sync has invalidated previously-cached plans."""
-    _ensure_meta_table(con)
-    row = con.execute(
+    to detect whether a sync has invalidated previously-cached plans.
+
+    Accepts a raw DuckDBPyConnection (backward compat) or an
+    ExecutionEngine. Both paths use the same engine API internally."""
+    engine = _as_engine(target)
+    _ensure_meta_table(engine)
+    row = engine.fetchone(
         "SELECT value FROM gibran_meta WHERE key = 'catalog_generation'"
-    ).fetchone()
+    )
     if row is None:
         return "0"
     return str(row[0])
 
 
-def bump_catalog_generation(con: duckdb.DuckDBPyConnection) -> str:
+def bump_catalog_generation(target: ConnectionOrEngine) -> str:
     """Write a fresh catalog generation token. Called by the applier
     at the end of a successful sync."""
-    import uuid as _uuid
-
-    _ensure_meta_table(con)
-    new_gen = _uuid.uuid4().hex
-    con.execute(
+    engine = _as_engine(target)
+    _ensure_meta_table(engine)
+    new_gen = uuid.uuid4().hex
+    engine.execute(
         "INSERT INTO gibran_meta (key, value) VALUES ('catalog_generation', ?) "
         "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
         [new_gen],
     )
+    engine.commit()
     return new_gen
 
 
@@ -84,8 +109,15 @@ def bump_catalog_generation(con: duckdb.DuckDBPyConnection) -> str:
 # PlanCache
 # ---------------------------------------------------------------------------
 
+
 class PlanCache:
-    """In-memory LRU cache. Thread-safe via a single lock."""
+    """Per-process LRU cache for compiled DSL queries.
+
+    The cache key is `(intent_json, catalog_generation)`. Both are
+    needed: identical intents from before vs after a sync MUST NOT
+    share a compiled-query entry, since the catalog (and therefore the
+    metric definitions the compiler resolves) may have changed.
+    """
 
     def __init__(self, max_size: int = 256) -> None:
         if max_size < 1:
@@ -96,7 +128,17 @@ class PlanCache:
         self.hits = 0
         self.misses = 0
 
-    def get(self, key: str) -> CompiledQuery | None:
+    def _make_key(self, intent: QueryIntent, generation: str) -> str:
+        payload = {
+            "intent": intent.model_dump(mode="json"),
+            "gen": generation,
+        }
+        return json.dumps(payload, sort_keys=True, default=str)
+
+    def get(
+        self, intent: QueryIntent, generation: str
+    ) -> CompiledQuery | None:
+        key = self._make_key(intent, generation)
         with self._lock:
             if key not in self._cache:
                 self.misses += 1
@@ -105,9 +147,15 @@ class PlanCache:
             self.hits += 1
             return self._cache[key]
 
-    def set(self, key: str, value: CompiledQuery) -> None:
+    def set(
+        self,
+        intent: QueryIntent,
+        generation: str,
+        compiled: CompiledQuery,
+    ) -> None:
+        key = self._make_key(intent, generation)
         with self._lock:
-            self._cache[key] = value
+            self._cache[key] = compiled
             self._cache.move_to_end(key)
             while len(self._cache) > self.max_size:
                 self._cache.popitem(last=False)
@@ -119,22 +167,11 @@ class PlanCache:
             self.misses = 0
 
 
-# Process-level singleton. Callers that want isolation construct their
-# own PlanCache instance and pass it explicitly to compile_intent_cached.
 _DEFAULT_CACHE = PlanCache()
 
 
 def default_cache() -> PlanCache:
     return _DEFAULT_CACHE
-
-
-def cache_key(intent: QueryIntent, catalog_gen: str) -> str:
-    """Stable hash key for a (intent, catalog generation) pair."""
-    payload: dict[str, Any] = {
-        "g": catalog_gen,
-        "i": intent.model_dump(mode="json"),
-    }
-    return json.dumps(payload, sort_keys=True, default=str)
 
 
 def compile_intent_cached(
@@ -143,20 +180,27 @@ def compile_intent_cached(
     *,
     cache: PlanCache | None = None,
 ) -> CompiledQuery:
-    """Cached wrapper around `compile_intent`.
-
-    Falls back to a no-op pass-through when `cache` is None and there's
-    no default cache (e.g. for tests that want to measure raw compile
-    cost). With the default cache, the same intent compiled twice -- with
-    the same catalog generation -- pays the compile cost once.
-    """
-    if cache is None:
-        cache = _DEFAULT_CACHE
+    """Memoized compile_intent. Reads the current catalog_generation
+    from `catalog.con` so cache entries automatically invalidate on
+    `gibran sync`."""
+    cache = cache or _DEFAULT_CACHE
     gen = catalog_generation(catalog.con)
-    key = cache_key(intent, gen)
-    cached = cache.get(key)
+    cached = cache.get(intent, gen)
     if cached is not None:
         return cached
     compiled = compile_intent(intent, catalog)
-    cache.set(key, compiled)
+    cache.set(intent, gen, compiled)
     return compiled
+
+
+# Re-exports for backward compat (older imports may pull these names).
+__all__ = [
+    "Catalog",
+    "CompiledQuery",
+    "PlanCache",
+    "bump_catalog_generation",
+    "catalog_generation",
+    "compile_intent",
+    "compile_intent_cached",
+    "default_cache",
+]

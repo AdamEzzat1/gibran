@@ -9,18 +9,34 @@ V1 constraints (intentional, enforced before governance is consulted):
 
 A `gibran_query_log` row is written for every attempt -- allow, deny, or
 error. The audit trail outlives the success of any individual query.
+
+Phase 5A.1b / 5A.1c: `run_sql_query` and its internal helpers accept
+either a raw `DuckDBPyConnection` (backward compat) OR an
+`ExecutionEngine`. A raw connection is wrapped in a `DuckDBEngine` at
+entry; the rest of the function works against the engine API.
+
+5A.1c additions:
+  - Result-cache helpers (`lookup`, `store`, `catalog_generation`,
+    `source_health_generation`, `bump_*_generation`) now accept the
+    engine. PostgresEngine participates in caching end-to-end; the
+    DuckDB-only guard around the cache call site is gone.
+  - Statement-timeout still uses DuckDB-specific syntax and is gated
+    on `engine.dialect == Dialect.DUCKDB`. Postgres's
+    `SET statement_timeout = <int>` form is a small follow-up.
 """
 from __future__ import annotations
 
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Union
 
 import duckdb
 import sqlglot
 from sqlglot import exp
 
+from gibran.execution.dialect import Dialect, active_dialect
+from gibran.execution.engine import DuckDBEngine, ExecutionEngine
 from gibran.governance.redaction import redact_audit_payload
 from gibran.governance.types import (
     DenyReason,
@@ -52,8 +68,24 @@ class QueryResult:
     original_sql: str
 
 
+ConnectionOrEngine = Union[duckdb.DuckDBPyConnection, ExecutionEngine]
+
+
+def _as_engine(con_or_engine: ConnectionOrEngine) -> ExecutionEngine:
+    """Normalize the entry-point argument to an `ExecutionEngine`.
+
+    Old callers pass a `DuckDBPyConnection`; we wrap it in DuckDBEngine.
+    New callers pass an engine directly. Detection is duck-typed via the
+    `dialect` attribute (which raw connections don't have) so we don't
+    pay the cost of a Protocol `isinstance` check.
+    """
+    if hasattr(con_or_engine, "dialect"):
+        return con_or_engine  # type: ignore[return-value]
+    return DuckDBEngine(con_or_engine)
+
+
 def run_sql_query(
-    con: duckdb.DuckDBPyConnection,
+    con_or_engine: ConnectionOrEngine,
     governance: GovernanceAPI,
     identity: IdentityContext,
     sql: str,
@@ -62,6 +94,9 @@ def run_sql_query(
 ) -> QueryResult:
     """Execute a governed SQL query end-to-end.
 
+    The first argument is either a `DuckDBPyConnection` (backward-compat,
+    auto-wrapped in a DuckDBEngine) or an `ExecutionEngine` directly.
+
     Returns a QueryResult; never raises (all errors are captured and
     written to the audit log).
 
@@ -69,6 +104,7 @@ def run_sql_query(
     callers leave it None; the DSL runner passes the JSON intent so the
     audit log captures the user-authored intent alongside the compiled SQL.
     """
+    engine = _as_engine(con_or_engine)
     query_id = str(uuid.uuid4())
     started_ns = time.monotonic_ns()
 
@@ -78,7 +114,7 @@ def run_sql_query(
         # source_id is unknown here -- redaction will fall back to the
         # global sensitive-column set in lookup_sensitive_columns.
         return _record_error(
-            con, query_id, identity, sql, str(e), started_ns,
+            engine, query_id, identity, sql, str(e), started_ns,
             nl_prompt=nl_prompt, source_id=None,
         )
 
@@ -91,7 +127,7 @@ def run_sql_query(
 
     if not decision.allowed:
         return _record_denied(
-            con, query_id, identity, sql, decision, started_ns,
+            engine, query_id, identity, sql, decision, started_ns,
             nl_prompt=nl_prompt, source_id=source_id,
         )
 
@@ -103,36 +139,39 @@ def run_sql_query(
 
     # Optional per-query timeout via env var. DuckDB's `statement_timeout`
     # is a session setting; we set it before execute and tolerate the case
-    # where it's not supported on older DuckDB builds.
+    # where it's not supported on older DuckDB builds. Postgres has its
+    # own `SET statement_timeout = <ms>` syntax (no quotes, no unit) --
+    # left to 5A.1c when Postgres is end-to-end runnable through this path.
     timeout_ms = _query_timeout_ms()
-    if timeout_ms is not None:
+    if timeout_ms is not None and engine.dialect == Dialect.DUCKDB:
         try:
-            con.execute(f"SET statement_timeout = '{timeout_ms}ms'")
+            engine.execute(f"SET statement_timeout = '{timeout_ms}ms'")
         except Exception:
             pass  # older DuckDB; honor on a best-effort basis
 
     # Result-cache lookup. Audit-log row is STILL written on a cache hit
-    # (we just skip the DuckDB execute). Set GIBRAN_DISABLE_RESULT_CACHE=1
+    # (we just skip the engine.query call). Set GIBRAN_DISABLE_RESULT_CACHE=1
     # to bypass caching for callers that need fresh-execute every time.
+    # 5A.1c: cache helpers now accept the engine directly, so all engine
+    # dialects participate in caching (key includes dialect to prevent
+    # cross-engine collisions).
     from gibran.execution.result_cache import lookup as _cache_lookup, store as _cache_store, CachedResult
     import os as _os
     use_cache = _os.environ.get("GIBRAN_DISABLE_RESULT_CACHE", "") != "1"
     cache_key = None
     cached = None
-    if use_cache:
-        cache_key, cached = _cache_lookup(con, rewritten, identity)
+    if use_cache and engine.con is not None:
+        cache_key, cached = _cache_lookup(engine, rewritten, identity)
 
     if cached is not None:
         rows = list(cached.rows)
         col_names = list(cached.columns)
     else:
         try:
-            cur = con.execute(rewritten)
-            rows = cur.fetchall()
-            col_names = [d[0] for d in cur.description] if cur.description else []
+            rows, col_names = engine.query(rewritten)
         except Exception as e:
             return _record_error(
-                con, query_id, identity, rewritten,
+                engine, query_id, identity, rewritten,
                 f"execution error: {e}", started_ns,
                 nl_prompt=nl_prompt, source_id=source_id,
             )
@@ -143,7 +182,7 @@ def run_sql_query(
 
     duration_ms = (time.monotonic_ns() - started_ns) // 1_000_000
     _write_query_log(
-        con,
+        engine,
         query_id=query_id, identity=identity,
         nl_prompt=nl_prompt, generated_sql=rewritten,
         status="ok", deny_reason=None,
@@ -170,7 +209,7 @@ def run_sql_query(
 
 def _parse_for_governance(sql: str) -> tuple[str, frozenset[str]]:
     try:
-        parsed = sqlglot.parse_one(sql, dialect="duckdb")
+        parsed = sqlglot.parse_one(sql, dialect=active_dialect())
     except Exception as e:
         raise QueryParseError(f"could not parse SQL: {e}") from e
 
@@ -359,9 +398,10 @@ def _parse_for_governance(sql: str) -> tuple[str, frozenset[str]]:
 
 
 def _inject_filter(sql: str, injected_filter: str) -> str:
-    parsed = sqlglot.parse_one(sql, dialect="duckdb")
-    parsed = parsed.where(injected_filter, dialect="duckdb")
-    return parsed.sql(dialect="duckdb")
+    dialect = active_dialect()
+    parsed = sqlglot.parse_one(sql, dialect=dialect)
+    parsed = parsed.where(injected_filter, dialect=dialect)
+    return parsed.sql(dialect=dialect)
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +409,7 @@ def _inject_filter(sql: str, injected_filter: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _record_denied(
-    con: duckdb.DuckDBPyConnection,
+    engine: ExecutionEngine,
     query_id: str,
     identity: IdentityContext,
     sql: str,
@@ -388,7 +428,7 @@ def _record_denied(
     else:
         deny_reason_str = None
     _write_query_log(
-        con,
+        engine,
         query_id=query_id, identity=identity,
         nl_prompt=nl_prompt, generated_sql=sql,
         status="denied", deny_reason=deny_reason_str,
@@ -410,7 +450,7 @@ def _record_denied(
 
 
 def _record_error(
-    con: duckdb.DuckDBPyConnection,
+    engine: ExecutionEngine,
     query_id: str,
     identity: IdentityContext,
     sql: str,
@@ -422,7 +462,7 @@ def _record_error(
 ) -> QueryResult:
     duration_ms = (time.monotonic_ns() - started_ns) // 1_000_000
     _write_query_log(
-        con,
+        engine,
         query_id=query_id, identity=identity,
         nl_prompt=nl_prompt, generated_sql=sql,
         status="error", deny_reason=None,
@@ -444,7 +484,7 @@ def _record_error(
 
 
 def _write_query_log(
-    con: duckdb.DuckDBPyConnection,
+    engine: ExecutionEngine,
     *,
     query_id: str,
     identity: IdentityContext,
@@ -459,14 +499,16 @@ def _write_query_log(
     # Redact literals adjacent to sensitive columns BEFORE persistence.
     # source_id is None on the parse-failure path; redact_audit_payload
     # falls back to a global sensitive-column lookup (over-redacts).
+    # TODO(5A.1c): redact_audit_payload still takes a raw connection.
+    # Pass engine.con for now; migrate the redaction lookup helper later.
     generated_sql, nl_prompt = redact_audit_payload(
-        con, source_id, generated_sql, nl_prompt
+        engine.con, source_id, generated_sql, nl_prompt
     )
     # Mark the audit row when the identity's role is a break-glass role.
     # This makes elevated-access usage searchable in the audit log
     # without changing the deny_reason semantics.
-    is_break_glass = _is_break_glass_role(con, identity.role_id)
-    con.execute(
+    is_break_glass = _is_break_glass_role(engine, identity.role_id)
+    engine.execute(
         "INSERT INTO gibran_query_log "
         "(query_id, user_id, role_id, nl_prompt, generated_sql, "
         "status, deny_reason, row_count, duration_ms, is_break_glass) "
@@ -479,13 +521,11 @@ def _write_query_log(
     )
 
 
-def _is_break_glass_role(
-    con: duckdb.DuckDBPyConnection, role_id: str
-) -> bool:
-    row = con.execute(
+def _is_break_glass_role(engine: ExecutionEngine, role_id: str) -> bool:
+    row = engine.fetchone(
         "SELECT is_break_glass FROM gibran_roles WHERE role_id = ?",
         [role_id],
-    ).fetchone()
+    )
     return bool(row[0]) if row is not None else False
 
 

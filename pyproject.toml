@@ -44,6 +44,23 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Phase 5A.2: optional PostgresEngine. Install via `pip install gibran[postgres]`.
+# Kept out of the default install so headless / DuckDB-only deployments
+# don't pull psycopg's binary wheel.
+postgres = ["psycopg[binary]>=3.1"]
+# Phase 5A.3: optional SnowflakeEngine. Install via `pip install gibran[snowflake]`.
+# Snowflake adapter code is in-tree; running against a real Snowflake account
+# requires a paid Snowflake subscription. See tests/test_snowflake_engine_integration.py
+# for the always-skip-without-credentials integration test stub.
+snowflake = ["snowflake-connector-python>=3.0"]
+# Phase 5A.4: optional BigQueryEngine. Install via `pip install gibran[bigquery]`.
+# BigQuery adapter code is in-tree; running against a real BigQuery project
+# requires a GCP project with billing enabled. See tests/test_bigquery_engine_integration.py
+# for the always-skip-without-credentials integration test stub.
+bigquery = ["google-cloud-bigquery>=3.0"]
+# Phase 4A: optional UI HTTP server. Install via `pip install gibran[ui]`.
+# Headless / CLI-only deployments don't pull FastAPI / uvicorn.
+ui = ["fastapi>=0.110", "uvicorn>=0.27"]
 
 [project.urls]
 Homepage = "https://github.com/AdamEzzat1/gibran"
@@ -55,3 +72,11 @@ gibran = "gibran.cli.main:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gibran"]
+# Phase 4B: pack the React build output into the wheel so installs via
+# `pip install gibran[ui]` get the SPA without needing a Node toolchain.
+# The frontend/ directory is a separate npm project; `npm run build`
+# emits to src/gibran/ui/static/, which Hatch's package globbing picks
+# up automatically (no force-include needed since it lives under the
+# gibran package). If the build hasn't run, the directory is empty
+# and the server falls back to a JSON placeholder.
+artifacts = ["src/gibran/ui/static/**"]

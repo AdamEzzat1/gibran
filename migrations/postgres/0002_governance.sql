@@ -1,0 +1,43 @@
+-- Postgres translation of migrations/0002_governance.sql.
+-- Roles, attributes, policies. Depends on gibran_sources from 0001.
+--
+-- Differences from DuckDB original:
+--   * JSON columns -> JSONB (Postgres's recommended JSON type).
+--   * Everything else portable.
+
+CREATE TABLE gibran_roles (
+  role_id      TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL
+);
+
+CREATE TABLE gibran_role_attributes (
+  role_id         TEXT NOT NULL REFERENCES gibran_roles,
+  attribute_key   TEXT NOT NULL,
+  attribute_value TEXT,
+  PRIMARY KEY (role_id, attribute_key)
+);
+
+CREATE TABLE gibran_user_attributes (
+  user_id         TEXT NOT NULL,
+  attribute_key   TEXT NOT NULL,
+  attribute_value TEXT,
+  PRIMARY KEY (user_id, attribute_key)
+);
+
+CREATE TABLE gibran_policies (
+  policy_id           TEXT PRIMARY KEY,
+  role_id             TEXT NOT NULL REFERENCES gibran_roles,
+  source_id           TEXT NOT NULL REFERENCES gibran_sources,
+  row_filter_ast      JSONB,
+  default_column_mode TEXT NOT NULL DEFAULT 'deny'
+                      CHECK (default_column_mode IN ('allow','deny')),
+  schema_version      INTEGER NOT NULL DEFAULT 1,
+  UNIQUE (role_id, source_id)
+);
+
+CREATE TABLE gibran_policy_columns (
+  policy_id   TEXT NOT NULL REFERENCES gibran_policies,
+  column_name TEXT NOT NULL,
+  granted     BOOLEAN NOT NULL,
+  PRIMARY KEY (policy_id, column_name)
+);

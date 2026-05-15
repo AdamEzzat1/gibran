@@ -13,7 +13,10 @@ import duckdb
 
 from gibran.sync.applier import apply as apply_config
 from gibran.sync.loader import load as load_config
-from gibran.sync.migrations import apply_all as apply_migrations
+from gibran.sync.migrations import (
+    apply_all as apply_migrations,
+    apply_all_for_engine,
+)
 
 
 app = typer.Typer(
@@ -42,20 +45,68 @@ def _config_path(root: Path) -> Path:
 def init(
     sample: bool = typer.Option(
         False, "--sample",
-        help="Also drop a starter gibran.yaml and seed a sample orders table.",
+        help="Also drop a starter gibran.yaml and seed a sample orders table. "
+             "Only valid with DuckDB engines.",
+    ),
+    engine: str = typer.Option(
+        None, "--engine",
+        help="Target engine URL. Examples: "
+             "'duckdb:gibran.duckdb' (default if omitted), "
+             "'postgres://user:pass@host:5432/db'. "
+             "Postgres requires `pip install gibran[postgres]`.",
     ),
 ) -> None:
-    """Create gibran.duckdb in CWD and apply all migrations.
+    """Create the gibran schema in the target engine and apply migrations.
 
-    With --sample, also writes a starter `gibran.yaml` to CWD and seeds a
-    small `orders` table so `gibran sync` + `gibran check` + `gibran query`
-    work end-to-end immediately."""
+    Default (no --engine): opens `./gibran.duckdb` and applies migrations
+    via the legacy flat layout. Equivalent to the pre-5A.6 behavior.
+
+    `--engine duckdb:path` opens DuckDB at the given path.
+
+    `--engine postgres://user:pass@host:port/db` connects to Postgres,
+    runs the migrations under `migrations/postgres/`, and persists the
+    governance schema there. `--sample` is rejected in this mode
+    (sample seeding is DuckDB-specific)."""
     root = _project_root()
-    db = _db_path(root)
     migrations = _migrations_dir(root)
     if not migrations.is_dir():
         typer.echo(f"error: no migrations dir at {migrations}", err=True)
         raise typer.Exit(code=1)
+
+    if engine is None or engine.startswith("duckdb"):
+        _init_duckdb(root, migrations, engine, sample)
+    elif engine.startswith("postgres://") or engine.startswith("postgresql://"):
+        _init_postgres(migrations, engine, sample)
+    else:
+        typer.echo(
+            f"error: unsupported engine URL: {engine!r}. "
+            f"Expected 'duckdb:path' or 'postgres://...'.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+
+def _parse_duckdb_url(engine: str | None, default_path: Path) -> Path:
+    """Resolve `--engine duckdb:path` to a filesystem path.
+
+    Forms accepted:
+      None              -> default_path (existing behavior)
+      'duckdb'          -> default_path (engine name without a path)
+      'duckdb:'         -> default_path (empty path)
+      'duckdb:foo.db'   -> Path('foo.db')
+      'duckdb:/abs/x'   -> Path('/abs/x')
+    """
+    if engine is None or engine == "duckdb" or engine == "duckdb:":
+        return default_path
+    if engine.startswith("duckdb:"):
+        return Path(engine[len("duckdb:"):])
+    return default_path  # unreachable per caller's branch guard
+
+
+def _init_duckdb(
+    root: Path, migrations: Path, engine: str | None, sample: bool
+) -> None:
+    db = _parse_duckdb_url(engine, _db_path(root))
     con = duckdb.connect(str(db))
     try:
         applied = apply_migrations(con, migrations)
@@ -80,6 +131,40 @@ def init(
             "  gibran query --role analyst_west --attr region=west "
             "--dsl '{\"source\":\"orders\",\"metrics\":[\"order_count\"]}'"
         )
+
+
+def _init_postgres(migrations: Path, url: str, sample: bool) -> None:
+    if sample:
+        typer.echo(
+            "error: --sample is only supported with DuckDB engines "
+            "(the sample seeds a DuckDB-specific orders table).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    try:
+        from gibran.execution.engines.postgres import PostgresEngine, connect
+    except ImportError as e:
+        # The module imports lazily; this catch covers transitive failures.
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=1)
+    try:
+        con = connect(url)
+    except ImportError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=1)
+    try:
+        eng = PostgresEngine(con=con)
+        applied = apply_all_for_engine(eng, migrations)
+    finally:
+        con.close()
+    if applied:
+        typer.echo(f"applied migrations: {applied}")
+    else:
+        typer.echo("no migrations to apply (already up to date)")
+    typer.echo(
+        "note: only migration 0001 is currently translated to Postgres. "
+        "See migrations/postgres/README.md for the 5A.5 follow-up list."
+    )
 
 
 _SAMPLE_YAML = """\
@@ -139,6 +224,7 @@ roles:
       region: west
   - id: admin
     display_name: Admin
+    is_break_glass: true
 
 policies:
   - id: analyst_west_orders
@@ -1101,6 +1187,99 @@ def ask(
         typer.echo("\t".join(qr.columns))
     for row in (qr.rows or ()):
         typer.echo("\t".join(str(v) for v in row))
+
+
+@app.command("ui")
+def ui_cmd(
+    host: str = typer.Option(
+        "127.0.0.1", "--host",
+        help="Bind host. Default 127.0.0.1 (local-only). "
+             "Setting 0.0.0.0 requires JWT auth mode -- the dev-mode "
+             "header-based identity is unsafe on a non-local bind.",
+    ),
+    port: int = typer.Option(
+        0, "--port",
+        help="Bind port. Default 0 = pick a free port.",
+    ),
+    db: str = typer.Option(
+        None, "--db",
+        help="Path to gibran.duckdb. Default: ./gibran.duckdb (same as CLI).",
+    ),
+    no_open: bool = typer.Option(
+        False, "--no-open",
+        help="Don't auto-open the browser. Useful when running headless.",
+    ),
+) -> None:
+    """Start the local HTTP UI for gibran.
+
+    Loads the DuckDB at --db (default ./gibran.duckdb), starts a
+    FastAPI server on 127.0.0.1, and opens the user's browser to it.
+    Ctrl-C to stop.
+
+    Requires `pip install gibran[ui]`. Identity comes from the
+    X-Gibran-User / X-Gibran-Role headers in dev mode (default), or
+    a Bearer JWT in production mode (set GIBRAN_UI_AUTH_MODE=jwt and
+    point GIBRAN_UI_JWT_JWKS_URL at your IdP)."""
+    try:
+        import uvicorn
+    except ImportError as e:
+        typer.echo(
+            "error: `gibran ui` requires the [ui] extras. "
+            "Install via `pip install gibran[ui]`.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from e
+
+    # Safety: refuse non-localhost binds when dev-mode auth is active
+    # (dev-mode reads headers without verification; safe locally only).
+    import os
+    auth_mode = os.environ.get("GIBRAN_UI_AUTH_MODE", "dev").lower()
+    if host not in ("127.0.0.1", "localhost") and auth_mode == "dev":
+        typer.echo(
+            f"error: refusing to bind to {host!r} in dev auth mode "
+            f"(headers are not verified). Either keep --host=127.0.0.1 "
+            f"or set GIBRAN_UI_AUTH_MODE=jwt with GIBRAN_UI_JWT_JWKS_URL "
+            f"pointing at your IdP.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    from gibran.ui.server import create_app
+
+    db_path = Path(db) if db else _db_path(_project_root())
+    if not db_path.exists():
+        typer.echo(
+            f"error: no gibran DB at {db_path}; run `gibran init` first",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    fast_app = create_app(db_path=db_path)
+
+    # Pick a free port if user didn't specify.
+    actual_port = port
+    if actual_port == 0:
+        import socket
+        s = socket.socket()
+        s.bind(("", 0))
+        actual_port = s.getsockname()[1]
+        s.close()
+
+    url = f"http://{host}:{actual_port}"
+    typer.echo(f"\ngibran ui starting at {url}")
+    typer.echo(f"  api docs:   {url}/api/docs")
+    typer.echo(f"  db path:    {db_path}")
+    typer.echo(f"  auth mode:  {auth_mode}")
+    typer.echo("\nCtrl-C to stop.\n")
+
+    if not no_open:
+        import webbrowser
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass  # headless / no browser available
+
+    uvicorn.run(fast_app, host=host, port=actual_port, log_level="info")
 
 
 if __name__ == "__main__":
