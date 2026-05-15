@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gibran"
-version = "0.1.0"
+version = "0.1.1"
 description = "Gibran: governed metric layer + non-LLM NL-to-SQL over DuckDB (Postgres/Snowflake/BigQuery via sqlglot). 25 metric primitives, 26 NL patterns, identity-aware row+column governance, audit-log redaction, optional local HTTP UI. Structural no-hallucination guarantee (pattern templates, never an LLM)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -80,6 +80,16 @@ packages = ["src/gibran"]
 # gibran package). If the build hasn't run, the directory is empty
 # and the server falls back to a JSON placeholder.
 artifacts = ["src/gibran/ui/static/**"]
+
+# v0.1.1 fix: ship the migrations alongside the gibran package so
+# `gibran init` works from a fresh `pip install gibran` (no source
+# checkout required). Force-include copies `migrations/` (which lives
+# at the repo root for editable-install convenience) into the wheel
+# at `gibran/migrations/`. The CLI's `_migrations_dir()` resolver
+# prefers the in-package location and falls back to the project root
+# for editable installs.
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "gibran/migrations"
 
 [tool.hatch.build.targets.sdist]
 # Explicit allow-list for the sdist. Without this, Hatch ships the

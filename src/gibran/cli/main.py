@@ -34,6 +34,25 @@ def _db_path(root: Path) -> Path:
 
 
 def _migrations_dir(root: Path) -> Path:
+    """Locate the migrations/ directory.
+
+    Lookup order:
+      1. The packaged location alongside the installed gibran package
+         (`<site-packages>/gibran/migrations/`). This is what
+         `pip install gibran` produces via Hatch's force-include in
+         pyproject.toml.
+      2. The project-root location (`./migrations/`). This is what
+         editable installs (`pip install -e .`) and source checkouts
+         use, since the dev layout keeps migrations at the repo root
+         for test convenience.
+
+    Returns the first one that exists. Falls back to (2) even if it
+    doesn't exist so the caller's "no migrations dir at <path>" error
+    points at the path the user would actually create."""
+    import gibran as _gibran_pkg
+    packaged = Path(_gibran_pkg.__file__).parent / "migrations"
+    if packaged.is_dir():
+        return packaged
     return root / "migrations"
 
 
