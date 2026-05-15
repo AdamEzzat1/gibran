@@ -28,6 +28,11 @@ import duckdb
 
 from gibran._source_dispatch import SourceDispatchError, from_clause_for_source
 from gibran._sql import qident, render_literal
+from gibran.dsl.shape_primitives import (
+    SHAPE_PRIMITIVES,
+    ShapePrimitive,
+    register_shape_primitive,
+)
 from gibran.dsl.types import DimensionRef, QueryIntent
 from gibran.governance.ast import compile_intent_to_sql
 
@@ -68,9 +73,19 @@ class CompiledQuery:
 
     Use `.render()` to assemble the final `WITH ... SELECT ...` string
     suitable for handing to the execution layer.
+
+    `bypasses_governance`: set by shape primitives that read from
+    gibran-internal tables (e.g. anomaly_query reads gibran_quality_runs).
+    For those, the SQL FROM clause references a table the user has no
+    user-source policy for -- but the DSL-level metric access check
+    already gated this (the user can see the metric in their AllowedSchema
+    iff the metric's declared source allows them). The SQL-level
+    governance check is skipped in run_sql_query when this flag is set.
+    Default False; setting it on any non-internal primitive is a bug.
     """
     ctes: tuple[CTE, ...]
     main_sql: str
+    bypasses_governance: bool = False
 
     def render(self) -> str:
         """Assemble `WITH cte1 AS (...), cte2 AS (...) <main_sql>`.
@@ -209,36 +224,24 @@ def compile_intent(intent: QueryIntent, catalog: Catalog) -> CompiledQuery:
         if mat_dims == intent_dim_ids and all(d.grain is None for d in intent.dimensions):
             return _build_materialized_select(metric_metas[0], intent)
 
-    # Shape-primitives short-circuit: cohort_retention, funnel, and
-    # multi_stage_filter are whole-query primitives that emit a fixed
-    # column shape via CTEs. They cannot be combined with other metrics
-    # or with intent.dimensions (the dsl validator enforces those
-    # preconditions; we double-check).
+    # Shape-primitives short-circuit: cohort_retention, funnel,
+    # multi_stage_filter, and any future user-declared shape primitive
+    # route through the registry below. Each emits a fixed column shape
+    # via CTEs and cannot be combined with other metrics or dimensions.
+    # The dsl validator already enforces the preconditions; we keep a
+    # defensive double-check here in case a caller compiles an
+    # unvalidated intent (the historical contract).
     for meta in metric_metas:
-        if meta.metric_type == "cohort_retention":
-            if len(metric_metas) != 1 or intent.dimensions:
-                raise CompileError(
-                    f"cohort_retention metric {meta.metric_id!r} must be the "
-                    f"only metric in the intent and intent.dimensions must "
-                    f"be empty"
-                )
-            return _build_cohort_retention(meta, from_relation, intent)
-        if meta.metric_type == "funnel":
-            if len(metric_metas) != 1 or intent.dimensions:
-                raise CompileError(
-                    f"funnel metric {meta.metric_id!r} must be the only "
-                    f"metric in the intent and intent.dimensions must be "
-                    f"empty"
-                )
-            return _build_funnel(meta, from_relation, intent)
-        if meta.metric_type == "multi_stage_filter":
-            if len(metric_metas) != 1 or intent.dimensions:
-                raise CompileError(
-                    f"multi_stage_filter metric {meta.metric_id!r} must be "
-                    f"the only metric in the intent and intent.dimensions "
-                    f"must be empty"
-                )
-            return _build_multi_stage_filter(meta, from_relation, intent)
+        primitive = SHAPE_PRIMITIVES.get(meta.metric_type)
+        if primitive is None:
+            continue
+        if len(metric_metas) != 1 or intent.dimensions:
+            raise CompileError(
+                f"{meta.metric_type} metric {meta.metric_id!r} must be the "
+                f"only metric in the intent and intent.dimensions must be "
+                f"empty"
+            )
+        return primitive.build(meta, intent, from_relation)
     dim_metas = [
         (dim, catalog.get_dimension(dim.id)) for dim in intent.dimensions
     ]
@@ -825,3 +828,193 @@ def _build_multi_stage_filter(
         ),
         main_sql=main_sql,
     )
+
+
+# ---------------------------------------------------------------------------
+# cohort_filter
+# ---------------------------------------------------------------------------
+
+def _build_cohort_filter(
+    meta: _MetricMeta, from_relation: str, intent: QueryIntent
+) -> CompiledQuery:
+    """Emit the 2-CTE + JOIN cohort-filter query.
+
+    Output shape: one row, one column = the metric_id alias holding the
+    count of distinct entities matching BOTH conditions.
+
+    SQL form:
+        WITH cohort AS (
+          SELECT DISTINCT <entity_column>
+          FROM <source>
+          WHERE <cohort_condition>
+        ),
+        result AS (
+          SELECT DISTINCT <entity_column>
+          FROM <source>
+          WHERE <result_condition>
+        )
+        SELECT COUNT(*) AS <metric_id>
+        FROM cohort
+        JOIN result USING (<entity_column>)
+
+    Use case: "customers who ordered in January AND returned in February"
+    -- cohort_condition selects the January cohort, result_condition the
+    February returners. The JOIN intersects both populations.
+
+    Trust model: cohort_condition and result_condition are raw SQL
+    WHERE-clause fragments (same precedent as funnel_steps[].condition).
+    They're authored in gibran.yaml by the catalog owner, not the
+    end-user; the V1 trust boundary is "anyone who can edit gibran.yaml
+    can write arbitrary predicates."
+    """
+    cfg = meta.metric_config
+    if not cfg:
+        raise CompileError(
+            f"cohort_filter metric {meta.metric_id!r} is missing metric_config "
+            f"(was the sync re-run after the primitive was added?)"
+        )
+    entity_col = qident(cfg["entity_column"])
+    cohort_cond = cfg["cohort_condition"]
+    result_cond = cfg["result_condition"]
+
+    # File-scan sources need an alias so the raw conditions can refer
+    # to columns; relational sources already are quoted identifiers.
+    if from_relation.startswith(("read_parquet(", "read_csv(")):
+        source_from = f"{from_relation} AS {qident(intent.source)}"
+    else:
+        source_from = from_relation
+
+    cohort_sql = (
+        f"SELECT DISTINCT {entity_col}\n"
+        f"FROM {source_from}\n"
+        f"WHERE {cohort_cond}"
+    )
+    result_sql = (
+        f"SELECT DISTINCT {entity_col}\n"
+        f"FROM {source_from}\n"
+        f"WHERE {result_cond}"
+    )
+    main_sql = (
+        f"SELECT COUNT(*) AS {qident(meta.metric_id)}\n"
+        f"FROM cohort\n"
+        f"JOIN result USING ({entity_col})"
+    )
+    return CompiledQuery(
+        ctes=(
+            CTE("cohort", cohort_sql),
+            CTE("result", result_sql),
+        ),
+        main_sql=main_sql,
+    )
+
+
+# ---------------------------------------------------------------------------
+# anomaly_query
+# ---------------------------------------------------------------------------
+
+def _build_anomaly_query(
+    meta: _MetricMeta, from_relation: str, intent: QueryIntent
+) -> CompiledQuery:
+    """Emit a SELECT against gibran_quality_runs for detected anomalies.
+
+    Output rows: (run_id, observed_value, ran_at, detected_anomaly).
+    Filtered to failed runs (passed = FALSE) of the metric's rule_id;
+    ordered most-recent-first; bounded by intent.limit.
+
+    Note: ignores `from_relation` -- the query reads from the system
+    table gibran_quality_runs, not the user source. The metric is still
+    *attached to* its declared source for governance purposes (only
+    identities with access to the source can see the metric in
+    AllowedSchema), which is the right trust model: the source owner
+    decides which of their anomaly rules are user-visible.
+    """
+    cfg = meta.metric_config
+    if not cfg:
+        raise CompileError(
+            f"anomaly_query metric {meta.metric_id!r} is missing metric_config "
+            f"(was the sync re-run after the primitive was added?)"
+        )
+    rule_id = cfg["rule_id"]
+    # SQL-quote the rule_id for safe inclusion; rule_id is operator-authored
+    # (gibran.yaml) so injection isn't a user-input attack vector, but
+    # render_literal handles edge cases (apostrophes, etc.).
+    main_sql = (
+        f"SELECT\n"
+        f"  run_id,\n"
+        f"  CAST(observed_value AS VARCHAR) AS observed_value,\n"
+        f"  ran_at,\n"
+        f"  NOT passed AS detected_anomaly\n"
+        f"FROM gibran_quality_runs\n"
+        f"WHERE rule_id = {render_literal(rule_id)}\n"
+        f"  AND passed = FALSE\n"
+        f"ORDER BY ran_at DESC\n"
+        f"LIMIT {intent.limit}"
+    )
+    return CompiledQuery(
+        ctes=(), main_sql=main_sql, bypasses_governance=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shape-primitive registry classes
+# ---------------------------------------------------------------------------
+#
+# These classes are the registry entries the compiler dispatches on. Each
+# is a thin wrapper around an existing `_build_*` function -- the SQL
+# emission logic stays here because it depends on module-private helpers
+# (`_MetricMeta`, the rendering functions). What the classes add is:
+#   1. Discoverability: SHAPE_PRIMITIVES.keys() lists every supported type.
+#   2. Precondition validation: each class owns its own validate_intent
+#      via the ShapePrimitive default, so dsl.validate doesn't need an
+#      if/elif chain that mirrors the compile-time one.
+#   3. Extensibility: a future user-declared shape primitive lands as a
+#      new @register_shape_primitive class -- no edit to compile_intent.
+
+@register_shape_primitive
+class CohortRetention(ShapePrimitive):
+    metric_type = "cohort_retention"
+
+    def build(
+        self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
+    ) -> CompiledQuery:
+        return _build_cohort_retention(meta, from_clause, intent)
+
+
+@register_shape_primitive
+class Funnel(ShapePrimitive):
+    metric_type = "funnel"
+
+    def build(
+        self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
+    ) -> CompiledQuery:
+        return _build_funnel(meta, from_clause, intent)
+
+
+@register_shape_primitive
+class MultiStageFilter(ShapePrimitive):
+    metric_type = "multi_stage_filter"
+
+    def build(
+        self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
+    ) -> CompiledQuery:
+        return _build_multi_stage_filter(meta, from_clause, intent)
+
+
+@register_shape_primitive
+class CohortFilter(ShapePrimitive):
+    metric_type = "cohort_filter"
+
+    def build(
+        self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
+    ) -> CompiledQuery:
+        return _build_cohort_filter(meta, from_clause, intent)
+
+
+@register_shape_primitive
+class AnomalyQuery(ShapePrimitive):
+    metric_type = "anomaly_query"
+
+    def build(
+        self, meta: _MetricMeta, intent: QueryIntent, from_clause: str,
+    ) -> CompiledQuery:
+        return _build_anomaly_query(meta, from_clause, intent)

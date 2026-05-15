@@ -91,9 +91,10 @@ def run_dsl_query(
     import os as _os
     try:
         if _os.environ.get("GIBRAN_DISABLE_PLAN_CACHE", "") == "1":
-            sql = compile_intent(intent, catalog).render()
+            compiled = compile_intent(intent, catalog)
         else:
-            sql = compile_intent_cached(intent, catalog).render()
+            compiled = compile_intent_cached(intent, catalog)
+        sql = compiled.render()
     except CompileError as e:
         return _pre_compile_failure(
             con, identity, intent_json, started_ns,
@@ -102,7 +103,15 @@ def run_dsl_query(
         )
 
     # Hand off to execution. Pass intent_json as nl_prompt for audit traceability.
-    query_result = run_sql_query(con, governance, identity, sql, nl_prompt=intent_json)
+    # When the compiled query queries internal gibran_* tables (e.g.
+    # anomaly_query reading gibran_quality_runs), skip the SQL-level
+    # source-governance check -- the DSL-level metric access check via
+    # preview_schema already gated this.
+    query_result = run_sql_query(
+        con, governance, identity, sql,
+        nl_prompt=intent_json,
+        bypasses_governance=compiled.bypasses_governance,
+    )
     duration_ms = (time.monotonic_ns() - started_ns) // 1_000_000
     return DSLRunResult(
         query_id=query_result.query_id,

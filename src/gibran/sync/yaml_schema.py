@@ -52,6 +52,12 @@ MetricType = Literal[
     # Aggregate primitives (Tier 2 Item 5):
     "weighted_avg", "stddev_samp", "stddev_pop",
     "count_distinct", "count_distinct_approx", "mode",
+    # Phase 1 Task 1.10 additions:
+    "variance", "first_value", "last_value", "median",
+    # Phase 3 shape primitive: filter entities by sub-query intersection.
+    "cohort_filter",
+    # Phase 3 shape primitive: query detected anomalies for a rule_id.
+    "anomaly_query",
 ]
 
 RollingAggregate = Literal["sum", "avg", "min", "max", "count"]
@@ -81,18 +87,44 @@ class MetricConfig(_Strict):
     # materialization (the metric value over the whole source, no
     # grouping). Validated below + by loader.
     materialized: list[str] | None = None
+    # Materialization strategy (Phase 2C):
+    #   "full"        -- rebuild the gibran_mat_<id> table on every sync.
+    #                    Simple, correct, but O(source rows) per sync.
+    #   "incremental" -- DELETE + INSERT only rows where watermark_column
+    #                    is newer than the last refresh's watermark. Requires
+    #                    watermark_column (typically a TIMESTAMP).
+    # Default "full" matches pre-Phase-2C behavior; opt-in for incremental.
+    materialized_strategy: Literal["full", "incremental"] | None = None
+    watermark_column: str | None = None
+    # Grace window for incremental refresh: rows where
+    # watermark_column > (last_refresh_watermark - late_arrival_grace_seconds)
+    # are re-evaluated each pass. Defends against rows arriving with a
+    # backdated watermark (e.g. an order whose order_date is yesterday but
+    # was inserted today). Default 0 = no grace, exact-match watermark.
+    late_arrival_grace_seconds: int | None = None
 
     @model_validator(mode="after")
     def _check_materialized_compat(self) -> "MetricConfig":
         if self.materialized is None:
+            if (
+                self.materialized_strategy is not None
+                or self.watermark_column is not None
+                or self.late_arrival_grace_seconds is not None
+            ):
+                raise ValueError(
+                    f"metric {self.id!r}: materialized_strategy / "
+                    f"watermark_column / late_arrival_grace_seconds require "
+                    f"`materialized` to be set"
+                )
             return self
         # V1 restriction: only simple aggregates can be materialized.
-        # Shape primitives (cohort/funnel/multi_stage_filter) have
-        # multi-column outputs that don't fit the (dim_cols, value) shape.
-        # ratio / expression have template references that we'd need to
-        # resolve at sync time -- deferrable.
+        # Shape primitives (cohort/funnel/multi_stage_filter/cohort_filter)
+        # have multi-column or CTE-based outputs that don't fit the
+        # (dim_cols, value) shape. ratio / expression have template
+        # references that we'd need to resolve at sync time -- deferrable.
         incompatible = {
-            "cohort_retention", "funnel", "multi_stage_filter",
+            "cohort_retention", "funnel", "multi_stage_filter", "cohort_filter",
+            "anomaly_query",
             "ratio", "expression", "rolling_window", "period_over_period",
         }
         if self.type in incompatible:
@@ -101,7 +133,36 @@ class MetricConfig(_Strict):
                 f"materialized in V1 (only direct aggregates: count / "
                 f"sum / avg / min / max / percentile / count_distinct / "
                 f"count_distinct_approx / stddev_samp / stddev_pop / mode "
-                f"/ weighted_avg)"
+                f"/ weighted_avg / variance / first_value / last_value / median)"
+            )
+        if self.materialized_strategy == "incremental":
+            if not self.watermark_column:
+                raise ValueError(
+                    f"metric {self.id!r}: materialized_strategy=incremental "
+                    f"requires `watermark_column`"
+                )
+            if not self.materialized:
+                raise ValueError(
+                    f"metric {self.id!r}: scalar materialization "
+                    f"(`materialized: []`) is incompatible with "
+                    f"materialized_strategy=incremental -- a single scalar "
+                    f"value has nothing to incrementally update; use "
+                    f"materialized_strategy=full or specify dimensions"
+                )
+            if (
+                self.late_arrival_grace_seconds is not None
+                and self.late_arrival_grace_seconds < 0
+            ):
+                raise ValueError(
+                    f"metric {self.id!r}: late_arrival_grace_seconds must "
+                    f"be >= 0, got {self.late_arrival_grace_seconds}"
+                )
+        elif self.watermark_column is not None:
+            # watermark_column without strategy=incremental is meaningless;
+            # call it out so users don't think they've enabled incremental.
+            raise ValueError(
+                f"metric {self.id!r}: watermark_column is only meaningful "
+                f"with materialized_strategy=incremental"
             )
         return self
 
@@ -160,6 +221,22 @@ class MetricConfig(_Strict):
     #   weighted_avg requires weight_column (alongside expression for the value)
     #   mode reuses `column` (the value to find the mode of)
     weight_column: str | None = None
+
+    # cohort_filter-specific (Phase 3 shape primitive). Output is one
+    # scalar row: the count of distinct entities matching BOTH the
+    # cohort_condition AND the result_condition.
+    # entity_column reuses the shared field (also used by cohort_retention).
+    # Conditions are raw SQL WHERE-clause fragments referencing the
+    # source's columns -- same trust model as funnel_steps[].condition.
+    cohort_condition: str | None = None
+    result_condition: str | None = None
+
+    # anomaly_query-specific (Phase 3 shape primitive). Queries
+    # gibran_quality_runs for failed runs of the named rule_id. The
+    # rule_id must reference an existing rule_type='anomaly' rule; the
+    # cross-entity check happens at sync time (loader), not in this
+    # field-local validator.
+    rule_id: str | None = None
 
     @model_validator(mode="after")
     def _check_shape(self) -> "MetricConfig":
@@ -319,6 +396,32 @@ class MetricConfig(_Strict):
                     f"metric {self.id!r}: multi_stage_filter cannot have "
                     f"expression/numerator/denominator"
                 )
+        elif self.type == "cohort_filter":
+            missing = [
+                f for f in ("entity_column", "cohort_condition", "result_condition")
+                if getattr(self, f) is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"metric {self.id!r}: cohort_filter requires {missing}"
+                )
+            if self.expression or self.numerator or self.denominator:
+                raise ValueError(
+                    f"metric {self.id!r}: cohort_filter cannot have "
+                    f"expression/numerator/denominator"
+                )
+        elif self.type == "anomaly_query":
+            if self.rule_id is None:
+                raise ValueError(
+                    f"metric {self.id!r}: anomaly_query requires `rule_id` "
+                    f"(pointing to a rule_type='anomaly' rule in "
+                    f"quality_rules)"
+                )
+            if self.expression or self.numerator or self.denominator:
+                raise ValueError(
+                    f"metric {self.id!r}: anomaly_query cannot have "
+                    f"expression/numerator/denominator"
+                )
         elif self.type == "weighted_avg":
             if self.expression is None or self.weight_column is None:
                 raise ValueError(
@@ -329,7 +432,7 @@ class MetricConfig(_Strict):
                 raise ValueError(
                     f"metric {self.id!r}: weighted_avg cannot have numerator/denominator"
                 )
-        elif self.type in ("stddev_samp", "stddev_pop"):
+        elif self.type in ("stddev_samp", "stddev_pop", "variance"):
             if not self.expression:
                 raise ValueError(
                     f"metric {self.id!r}: {self.type} requires `expression`"
@@ -338,7 +441,10 @@ class MetricConfig(_Strict):
                 raise ValueError(
                     f"metric {self.id!r}: {self.type} cannot have numerator/denominator"
                 )
-        elif self.type in ("count_distinct", "count_distinct_approx", "mode"):
+        elif self.type in (
+            "count_distinct", "count_distinct_approx", "mode",
+            "first_value", "last_value", "median",
+        ):
             if self.column is None:
                 raise ValueError(
                     f"metric {self.id!r}: {self.type} requires `column`"

@@ -25,13 +25,16 @@ from typing import TYPE_CHECKING
 
 import duckdb
 
+from gibran.dsl.errors import IntentValidationError
+from gibran.dsl.shape_primitives import SHAPE_PRIMITIVES
 from gibran.dsl.types import QueryIntent
 from gibran.governance.ast import ASTValidationError, validate_intent_ast
 from gibran.governance.types import AllowedSchema
 
 
-class IntentValidationError(ValueError):
-    pass
+# Re-exported for backward compatibility: historical call-sites import
+# IntentValidationError from this module, not from dsl.errors.
+__all__ = ["IntentValidationError", "validate_intent"]
 
 
 def validate_intent(
@@ -118,36 +121,21 @@ def validate_intent(
             f"or use a non-rolling metric."
         )
 
-    # Shape-primitives (cohort_retention, funnel, multi_stage_filter) emit
-    # a whole-query shape with their own dimensions baked in. They cannot
-    # be combined with other metrics, intent.dimensions, intent.filters,
-    # intent.having, or intent.order_by -- the compiler emits the whole
-    # query, so user-supplied modifiers have nowhere to plug in.
-    shape_metrics = [
-        m for m in schema.metrics
-        if m.metric_id in intent_metric_set
-        and m.metric_type in ("cohort_retention", "funnel", "multi_stage_filter")
-    ]
-    if shape_metrics:
-        sm = shape_metrics[0]
-        if len(intent.metrics) != 1:
-            raise IntentValidationError(
-                f"{sm.metric_type} metric {sm.metric_id!r} must be the only "
-                f"metric in the intent (it emits a whole-query shape and "
-                f"doesn't compose with other metrics in V1)"
-            )
-        if intent.dimensions:
-            raise IntentValidationError(
-                f"{sm.metric_type} metric {sm.metric_id!r} cannot be "
-                f"combined with intent.dimensions (the cohort/period or "
-                f"funnel-step dimensions are emitted by the primitive itself)"
-            )
-        if intent.filters or intent.having or intent.order_by:
-            raise IntentValidationError(
-                f"{sm.metric_type} metric {sm.metric_id!r} cannot be "
-                f"combined with intent.filters / having / order_by in V1 "
-                f"(the primitive emits the whole query)"
-            )
+    # Shape primitives (cohort_retention, funnel, multi_stage_filter, and
+    # any future registered primitive) own their own precondition checks
+    # via ShapePrimitive.validate_intent. We look up the registry by
+    # metric_type and delegate; the default implementation enforces the
+    # V1 contract (single metric, no dimensions / filters / having /
+    # order_by). At most one shape primitive can appear in an intent --
+    # the single-metric check inside validate_intent enforces that, but
+    # we break after the first to avoid double-raising on the same shape.
+    for m in schema.metrics:
+        if m.metric_id not in intent_metric_set:
+            continue
+        primitive = SHAPE_PRIMITIVES.get(m.metric_type)
+        if primitive is not None:
+            primitive.validate_intent(intent, m.metric_id)
+            break
 
     # period_over_period metrics: their LAG window references DATE_TRUNC over
     # the metric's configured period_dim; the intent's dimension list must

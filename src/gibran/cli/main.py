@@ -288,6 +288,104 @@ def register() -> None:
 
 
 @app.command()
+def materialize(
+    metric: str = typer.Option(
+        None, "--metric", "-m",
+        help="Refresh only this metric (default: all materialized metrics).",
+    ),
+    full: bool = typer.Option(
+        False, "--full",
+        help="Force full rebuild for incremental-strategy metrics. Useful "
+             "after a schema change to backfill from scratch.",
+    ),
+    config: Path = typer.Option(
+        None, "--config", "-c",
+        help="Path to gibran.yaml (default: ./gibran.yaml).",
+    ),
+) -> None:
+    """Refresh materialized-metric tables without running a full sync.
+
+    For metrics with `materialized_strategy: incremental`, performs the
+    DELETE + re-INSERT pass against rows newer than the last refresh's
+    watermark. For `materialized_strategy: full` metrics (the default),
+    rebuilds the table from scratch. `--full` overrides incremental
+    behavior and rebuilds those too.
+
+    This is the operator-facing surface for keeping materialized tables
+    fresh between full syncs -- typically run on a schedule (cron /
+    systemd timer) alongside `gibran check`.
+    """
+    from gibran.sync.applier import _materialize_metrics
+
+    root = _project_root()
+    db = _db_path(root)
+    cfg_path = config if config else _config_path(root)
+    if not cfg_path.is_file():
+        typer.echo(f"error: no config at {cfg_path}", err=True)
+        raise typer.Exit(code=1)
+    if not db.exists():
+        typer.echo(f"error: no DB at {db}; run `gibran init` first", err=True)
+        raise typer.Exit(code=1)
+    validated = load_config(cfg_path)
+    materialized = [
+        m for m in validated.config.metrics if m.materialized is not None
+    ]
+    if metric is not None and not any(m.id == metric for m in materialized):
+        typer.echo(
+            f"error: metric {metric!r} is not materialized "
+            f"(set `materialized: [...]` on the YAML)",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    con = duckdb.connect(str(db))
+    try:
+        _materialize_metrics(
+            con, validated.config.metrics,
+            only_metric_id=metric, force_full=full,
+        )
+    finally:
+        con.close()
+    target = metric if metric else f"all {len(materialized)} materialized metric(s)"
+    strategy_label = "full" if full else "configured strategy"
+    typer.echo(f"materialized {target} using {strategy_label}")
+
+
+@app.command()
+def touch(
+    source_id: str = typer.Argument(
+        ..., help="ID of the source whose cached results should be invalidated.",
+    ),
+) -> None:
+    """Bump the data-version token for a source, invalidating cached results.
+
+    Useful after writing to a `duckdb_table` source externally (a script,
+    another process, an upstream pipeline) so subsequent queries re-execute
+    against the new data instead of serving stale rows from the result cache.
+
+    For `parquet` and `csv` sources this is a no-op: the file's mtime is the
+    authoritative version token. Rewrite the file and the cache invalidates
+    automatically on the next query.
+    """
+    from gibran._source_dispatch import SourceDispatchError, touch_source
+
+    root = _project_root()
+    db = _db_path(root)
+    if not db.exists():
+        typer.echo(f"error: no DB at {db}", err=True)
+        raise typer.Exit(code=1)
+    con = duckdb.connect(str(db))
+    try:
+        version = touch_source(con, source_id)
+    except SourceDispatchError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=1)
+    finally:
+        con.close()
+    # Show only a short prefix of the version token -- full uuids are noise.
+    typer.echo(f"touched {source_id}: version={version[:12]}")
+
+
+@app.command()
 def check(
     source: str = typer.Option(
         None, "--source", "-s",

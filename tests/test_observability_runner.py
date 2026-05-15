@@ -168,12 +168,15 @@ class TestRunChecks:
         con = _populated_db_with_data()
         obs = DefaultObservability(con)
         result = run_checks(con, "orders", obs)
-        # Fixture has 2 quality rules + 1 freshness rule = 3 total
-        assert result.total == 3
+        # Fixture has 3 quality rules + 1 freshness rule = 4 total
+        # (orders_revenue_anomaly was added in Phase 3 to support the
+        # anomaly_query metric type).
+        assert result.total == 4
         rule_ids = {r.rule_id for r in result.results}
         assert rule_ids == {
             "orders_amount_not_null",
             "orders_amount_range",
+            "orders_revenue_anomaly",
             "orders_freshness_24h",
         }
 
@@ -184,7 +187,7 @@ class TestRunChecks:
         run_count = con.execute(
             "SELECT COUNT(*) FROM gibran_quality_runs"
         ).fetchone()[0]
-        assert run_count == 3
+        assert run_count == 4
 
     def test_refreshes_source_health(self) -> None:
         con = _populated_db_with_data()

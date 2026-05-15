@@ -8,17 +8,29 @@ see different row sets via the injected row filter).
 Invalidation
 ------------
 
-The cache reads the same `catalog_generation` token as the plan cache,
-so `gibran sync` invalidates results too. It additionally reads a
-`source_health_generation` token that bumps each time `gibran check`
-runs -- this guards against serving a cached result based on data the
-quality rules now say is bad. Callers can also explicitly `clear()`.
+The cache key includes three generation tokens, each bumped by a
+distinct event class:
 
-The cache does NOT track the source's actual data version (last-write
-timestamp on the underlying table / parquet file). For dynamic sources
-that change between syncs/checks the cache will serve stale rows
-until the next check pass. V1 accepts that tradeoff; V2 will likely
-need a source-version probe.
+  * catalog_generation        -- bumped by `gibran sync`. Catches
+                                 metric/dimension/policy YAML changes.
+  * source_health_generation  -- bumped by `gibran check`. Catches
+                                 quality-rule outcomes (block/warn).
+  * source_data_version       -- recomputed per lookup (Phase 2B).
+                                 Catches the source's actual data
+                                 state between sync/check passes.
+
+For parquet/csv sources the data version is `os.stat().st_mtime_ns`,
+read fresh on each lookup. For duckdb_table / sql_view it's the opaque
+token in `gibran_table_versions`, bumped by `gibran touch <source>`.
+sql_view does NOT auto-derive its version from underlying tables in V1
+-- recursive view-version derivation is Phase 3 work.
+
+Trust model: if a user can manipulate the source file's mtime
+(`touch foo.parquet`), they can either freeze the cache (set mtime
+backwards) or force re-execution on every query (set mtime forward).
+Neither is a *governance* break -- they still only see rows the policy
+allows -- but the latter is a denial-of-service-shaped bug class.
+Document, accept.
 
 V1 design
 ---------
@@ -44,6 +56,7 @@ from typing import Union
 
 import duckdb
 
+from gibran._source_dispatch import SourceDispatchError, source_data_version
 from gibran.dsl.plan_cache import catalog_generation
 from gibran.execution.dialect import active_dialect
 from gibran.execution.engine import DuckDBEngine, ExecutionEngine
@@ -156,15 +169,19 @@ def cache_key(
     identity: IdentityContext,
     catalog_gen: str,
     health_gen: str,
+    data_version: str = "",
     dialect: str | None = None,
 ) -> str:
     """Stable hash key combining all the inputs that change result rows.
 
-    The dialect is included so that when 5A.2+ adds Postgres / Snowflake /
-    BigQuery engines, the same SQL string compiled by different engines
-    can't collide in the cache. Today DuckDB is the only engine, so the
-    key is effectively identical to before; the dialect dimension is
-    additive.
+    `data_version` (Phase 2B) is the source's per-lookup data-state
+    token (parquet mtime / table-versions row). Defaults to "" for
+    callers without a source_id -- degrades to pre-Phase-2B behavior
+    (data-state changes don't invalidate, only catalog/health bumps do).
+
+    `dialect` (Phase 5A.0) ensures the same SQL string compiled by
+    different engines (DuckDB vs Postgres vs Snowflake vs BigQuery)
+    can't collide in the cache. Defaults to the active dialect.
     """
     payload = {
         "sql": rewritten_sql,
@@ -173,6 +190,7 @@ def cache_key(
         "a": sorted((identity.attributes or {}).items()),
         "cg": catalog_gen,
         "hg": health_gen,
+        "dv": data_version,
         "d": dialect or active_dialect().value,
     }
     return json.dumps(payload, sort_keys=True, default=str)
@@ -183,19 +201,41 @@ def lookup(
     rewritten_sql: str,
     identity: IdentityContext,
     *,
+    source_id: str | None = None,
     cache: ResultCache | None = None,
 ) -> tuple[str, CachedResult | None]:
     """Look up a cached result. Returns (key, cached_value_or_None).
 
     Accepts a raw DuckDBPyConnection (backward compat) or an
-    ExecutionEngine. The caller is responsible for storing back on a
-    miss via `store(key, CachedResult(rows, columns), cache=...)`.
+    ExecutionEngine (Phase 5A.1c). The caller is responsible for
+    storing back on a miss via `store(key, CachedResult(rows, columns),
+    cache=...)`.
+
+    `source_id` enables data-version probing (Phase 2B). When provided,
+    the cache key includes the source's current data version, so
+    parquet rewrites / `gibran touch` calls invalidate cached results.
+    Legacy callers that don't pass source_id degrade to the pre-Phase-2B
+    behavior (catalog + health generations only).
     """
     if cache is None:
         cache = _DEFAULT_CACHE
     cg = catalog_generation(target)
     hg = source_health_generation(target)
-    key = cache_key(rewritten_sql, identity, cg, hg)
+    dv = ""
+    if source_id is not None:
+        # source_data_version still takes a raw connection (Phase 2B
+        # predates the engine migration). Extract from engine if needed.
+        con = target.con if hasattr(target, "con") else target
+        if con is not None:
+            try:
+                dv = source_data_version(con, source_id)
+            except SourceDispatchError:
+                # Source missing / unrecognized type. Fall back to dv=""
+                # rather than crashing the cache path -- the downstream
+                # SQL execution surfaces the same error with clearer
+                # context (and writes the audit log row).
+                dv = ""
+    key = cache_key(rewritten_sql, identity, cg, hg, dv)
     return key, cache.get(key)
 
 

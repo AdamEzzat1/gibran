@@ -91,6 +91,7 @@ def run_sql_query(
     sql: str,
     *,
     nl_prompt: str | None = None,
+    bypasses_governance: bool = False,
 ) -> QueryResult:
     """Execute a governed SQL query end-to-end.
 
@@ -103,39 +104,59 @@ def run_sql_query(
     `nl_prompt` is recorded in gibran_query_log for traceability. Raw-SQL
     callers leave it None; the DSL runner passes the JSON intent so the
     audit log captures the user-authored intent alongside the compiled SQL.
+
+    `bypasses_governance` (default False) is set by the DSL runner when
+    compiling shape primitives that read from internal gibran_* tables
+    (e.g. anomaly_query reading gibran_quality_runs). In that case the
+    SQL's FROM clause references a table the user has no source policy
+    for -- but the DSL-level metric access was already gated via
+    preview_schema. Skip the SQL-level recheck and execute. Raw-SQL
+    callers (the CLI's `gibran query "..."` raw path) MUST NOT set this
+    flag; it's compiler-output-only.
     """
     engine = _as_engine(con_or_engine)
     query_id = str(uuid.uuid4())
     started_ns = time.monotonic_ns()
 
-    try:
-        source_id, requested_columns = _parse_for_governance(sql)
-    except (QueryParseError, UnsupportedQueryError) as e:
-        # source_id is unknown here -- redaction will fall back to the
-        # global sensitive-column set in lookup_sensitive_columns.
-        return _record_error(
-            engine, query_id, identity, sql, str(e), started_ns,
-            nl_prompt=nl_prompt, source_id=None,
+    if bypasses_governance:
+        # Trusted shape-primitive output. Skip parse-for-governance + the
+        # evaluate() call. The DSL-level preview_schema already verified
+        # the user can see this metric; the compiled SQL was generated
+        # by gibran code, not user input. source_id is None for audit
+        # purposes (the SQL touches an internal table, not a user source).
+        source_id = None
+        rewritten = sql
+        decision = None
+    else:
+        try:
+            source_id, requested_columns = _parse_for_governance(sql)
+        except (QueryParseError, UnsupportedQueryError) as e:
+            # source_id is unknown here -- redaction will fall back to the
+            # global sensitive-column set in lookup_sensitive_columns.
+            return _record_error(
+                engine, query_id, identity, sql, str(e), started_ns,
+                nl_prompt=nl_prompt, source_id=None,
+            )
+
+        decision = governance.evaluate(
+            identity,
+            frozenset({source_id}),
+            frozenset(requested_columns),
+            (),  # no metric refs in raw SQL path
         )
 
-    decision = governance.evaluate(
-        identity,
-        frozenset({source_id}),
-        frozenset(requested_columns),
-        (),  # no metric refs in raw SQL path
-    )
+        if not decision.allowed:
+            return _record_denied(
+                engine, query_id, identity, sql, decision, started_ns,
+                nl_prompt=nl_prompt, source_id=source_id,
+            )
 
-    if not decision.allowed:
-        return _record_denied(
-            engine, query_id, identity, sql, decision, started_ns,
-            nl_prompt=nl_prompt, source_id=source_id,
+        rewritten = (
+            _inject_filter(sql, decision.injected_filter_sql)
+            if decision.injected_filter_sql
+            else sql
         )
-
-    rewritten = (
-        _inject_filter(sql, decision.injected_filter_sql)
-        if decision.injected_filter_sql
-        else sql
-    )
+    # bypasses_governance path: rewritten was already set to sql above.
 
     # Optional per-query timeout via env var. DuckDB's `statement_timeout`
     # is a session setting; we set it before execute and tolerate the case
@@ -161,7 +182,9 @@ def run_sql_query(
     cache_key = None
     cached = None
     if use_cache and engine.con is not None:
-        cache_key, cached = _cache_lookup(engine, rewritten, identity)
+        cache_key, cached = _cache_lookup(
+            engine, rewritten, identity, source_id=source_id,
+        )
 
     if cached is not None:
         rows = list(cached.rows)

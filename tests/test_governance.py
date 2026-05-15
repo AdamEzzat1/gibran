@@ -51,6 +51,15 @@ class TestPreviewSchema:
             "order_count", "gross_revenue", "avg_order_value", "revenue_per_paid_order",
             "p95_amount", "revenue_7d_rolling", "revenue_mom",
             "customer_retention", "paid_funnel",
+            # Phase 3 NL fixture additions:
+            "unique_customers", "avg_amount", "max_amount", "min_amount",
+            "median_amount", "first_amount", "last_amount",
+            # Phase 3 comparison-routing addition:
+            "revenue_yoy",
+            # Phase 3 cohort_filter primitive addition:
+            "jan_to_feb_returners",
+            # Phase 3 anomaly_query primitive addition:
+            "revenue_anomalies",
         }
 
     def test_external_partner_sees_only_granted_columns_default_deny(self) -> None:

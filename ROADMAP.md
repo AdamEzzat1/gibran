@@ -9,6 +9,57 @@ noted.
 Each phase follows the stack-role-group panel pattern:
 **panel → synthesized direction → tasks → adversarial verification.**
 
+## Executive summary
+
+| Phase | Focus | Time | What lands |
+|---|---|---|---|
+| 1 | NL pattern expansion + easy primitives | 1-2 wk | 6 → ~15 patterns, synonyms dict, 4 new scalar primitives. Mechanical work; biggest cheap win. |
+| 2A | Shape-primitive refactor | 1-2 wk | Branch in `compile_intent` becomes a `ShapePrimitive` protocol + registry. Cohort/funnel/multi_stage as registered classes. |
+| 2B | Result cache data-version tracking | 1 wk | File mtime for parquet/csv; `gibran_table_versions` for duckdb tables; `gibran touch <source>` CLI. Closes the stale-cache hole. |
+| 2C | Materialized metric incremental refresh | 1-2 wk | `materialized_strategy: incremental` with watermark; `gibran_mat_state` track table; `gibran materialize` CLI. Sync stays interactive at 1M+ rows. |
+| 3 | NL deepening toward 30 | 2-3 wk | Entity recognizer (no LLM); time-phrase parser; `comparison` + `relative_time_filter` + `cohort_filter` primitives; 12-15 new patterns across 5 categories. |
+| 4 | `gibran ui` command | 4-6 wk | FastAPI backend + React frontend bundled in the wheel. Catalog browser + query box + audit log viewer. 5x audience expansion. |
+
+Sequential total: **~12-18 weeks**. Parallelizable across Phase 2 (~10-15 weeks) if multiple contributors.
+
+### How the role-group pattern shows up
+
+Each phase has the same shape (matching the lock in `feedback_panel_pattern.md`):
+
+- **Panel** — 2-3 most-relevant roles, each with one pro/con line
+- **Synthesized direction** — what's decided + the rationale
+- **Tasks** — sized, file-pointed, ordered
+- **Adversarial** — one critic role pushes back; answers either defend the call or revise it
+
+E.g. for Phase 2A (shape-primitive refactor):
+
+- DB Architect notes the refactor is mechanical (`CompiledQuery` already supports the shape)
+- Analytics Engineer flags the unlock (user-declared shape primitives in YAML)
+- PM critic challenges the user-visible value
+- Answer defends it as enabling Phase 3 without doubling the work
+
+### What's NOT in the roadmap (deliberately)
+
+| Item | Why deferred |
+|---|---|
+| Multi-tenancy primitives | V2; needs deployment-shape decision first |
+| Embedding-retrieval NL (Tier 5 Item 20) | After Phase 3 patterns hit the ceiling AND user feedback says "I don't know" rate is unacceptable |
+| Server mode + cross-process rate limit | Tied to multi-tenancy |
+| dbt / Cube integration | Different roadmap entirely; revisit after Phase 4 |
+
+### The stop-doing list (explicit non-goals)
+
+These four lines are the clearest contribution of the roadmap:
+
+- **DO NOT** add an LLM to the NL emission path.
+- **DO NOT** ship a new shape primitive on top of the current branch hack (do Phase 2A first).
+- **DO NOT** generalize the cache before Phase 2B's data-version tracking lands.
+- **DO NOT** add new dependencies that aren't already in the wheel during Phase 4.
+
+The first one is the locked Tier-5 constraint. The other three are anti-patterns a future contributor would drift into if they're just "shipping things" without re-reading the design rationale — calling them out by name is the cheapest insurance.
+
+---
+
 ## Context
 
 V0.0.2 ships a structurally-complete governed metric layer with a

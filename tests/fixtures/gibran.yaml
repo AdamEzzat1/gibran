@@ -91,6 +91,16 @@ metrics:
     comparison: delta
     unit: USD
     description: Change in gross revenue compared to the prior month.
+  - id: revenue_yoy
+    source: orders
+    display_name: Revenue Year-over-Year
+    type: period_over_period
+    base_metric: gross_revenue
+    period_dim: orders.order_date
+    period_unit: year
+    comparison: delta
+    unit: USD
+    description: Change in gross revenue compared to the prior year.
   - id: customer_retention
     source: orders
     display_name: Customer Retention
@@ -113,6 +123,70 @@ metrics:
       - name: paid
         condition: status = 'paid'
     description: Two-step funnel -- ordered, then paid.
+  # Phase 3 NL fixture additions: simple aggregates covering the
+  # type-keyword patterns (unique / max / min / avg / median / first / last).
+  - id: unique_customers
+    source: orders
+    display_name: Unique Customers
+    type: count_distinct
+    column: customer_email
+    description: Distinct customer count.
+  - id: avg_amount
+    source: orders
+    display_name: Average Order Amount
+    type: avg
+    expression: amount
+    unit: USD
+    description: Mean order amount.
+  - id: max_amount
+    source: orders
+    display_name: Max Order Amount
+    type: max
+    expression: amount
+    unit: USD
+    description: Largest single order amount.
+  - id: min_amount
+    source: orders
+    display_name: Min Order Amount
+    type: min
+    expression: amount
+    unit: USD
+    description: Smallest single order amount.
+  - id: median_amount
+    source: orders
+    display_name: Median Order Amount
+    type: median
+    column: amount
+    unit: USD
+    description: Median order amount.
+  - id: first_amount
+    source: orders
+    display_name: First Order Amount
+    type: first_value
+    column: amount
+    unit: USD
+    description: First order amount by scan order.
+  - id: last_amount
+    source: orders
+    display_name: Last Order Amount
+    type: last_value
+    column: amount
+    unit: USD
+    description: Last order amount by scan order.
+  - id: jan_to_feb_returners
+    source: orders
+    display_name: Jan to Feb Returners
+    type: cohort_filter
+    entity_column: customer_email
+    cohort_condition: "order_date >= '2026-01-01' AND order_date < '2026-02-01' AND status = 'paid'"
+    result_condition: "order_date >= '2026-02-01' AND order_date < '2026-03-01' AND status = 'paid'"
+    description: Customers who placed a paid order in January AND returned with another paid order in February.
+  - id: revenue_anomalies
+    source: orders
+    display_name: Revenue Anomalies
+    type: anomaly_query
+    rule_id: orders_revenue_anomaly
+    description: Detected anomalies in the revenue anomaly rule's observations.
 
 roles:
   - id: analyst_west
@@ -160,6 +234,14 @@ quality_rules:
       column: amount
       min: 0
       max: 1000000
+    severity: warn
+  - id: orders_revenue_anomaly
+    source: orders
+    type: anomaly
+    config:
+      sql: "SELECT SUM(amount) FROM orders WHERE status = 'paid'"
+      n_sigma: 2.0
+      trailing_periods: 7
     severity: warn
 
 freshness_rules:

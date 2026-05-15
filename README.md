@@ -36,7 +36,7 @@ recorded for each attempt.
 
 | Capability | How |
 |---|---|
-| Declare metrics declaratively | `metrics:` block in `gibran.yaml`; **19 primitives** (`count` / `sum` / `avg` / `min` / `max` / `ratio` / `expression` / `percentile` / `rolling_window` / `period_over_period` / `cohort_retention` / `funnel` / `multi_stage_filter` / `weighted_avg` / `stddev_samp` / `stddev_pop` / `count_distinct` / `count_distinct_approx` / `mode`). |
+| Declare metrics declaratively | `metrics:` block in `gibran.yaml`; **23 primitives** (`count` / `sum` / `avg` / `min` / `max` / `ratio` / `expression` / `percentile` / `rolling_window` / `period_over_period` / `cohort_retention` / `funnel` / `multi_stage_filter` / `weighted_avg` / `stddev_samp` / `stddev_pop` / `count_distinct` / `count_distinct_approx` / `mode` / `variance` / `first_value` / `last_value` / `median`). |
 | **Ask in plain English (NEW)** | `gibran ask "show me revenue by region"`. Pattern-template NL layer; **no LLM, no hallucination** — slot resolution requires real metric/dim names on the role's AllowedSchema. Returns "I don't know how to answer that" rather than invent. |
 | **Cohort retention + funnels** | Declare `type: cohort_retention` or `type: funnel`; the engine emits multi-CTE queries (cohort assignment → period join → aggregate; or one CTE per funnel step with `LAG()` conversion ratios). |
 | **Multi-stage filtering** | `type: multi_stage_filter` — "of the top decile by 90-day spend, what's their churn rate?" as a single declarative metric. |
@@ -56,7 +56,7 @@ recorded for each attempt.
 | Introspect what's available | `gibran describe <source>`, `gibran catalog`, `gibran explain --dsl '...'`. |
 | Export results | `gibran query --output csv|json|parquet [path]`. |
 
-## What's proven (456 tests)
+## What's proven (603 tests)
 
 Every test runs in-process against an in-memory DuckDB; the whole suite
 completes in under a minute.
@@ -573,17 +573,106 @@ cannot fabricate a metric that doesn't exist.
 
 ### What patterns are wired
 
+26 patterns total. Grouped by what they unlock:
+
+**Ranking & projection**
+
 | Pattern | Example input | Routes to |
 |---|---|---|
-| `top_n_by_metric` | "top 5 region by gross revenue" | DSL with ORDER BY + LIMIT |
-| `metric_by_grain` | "revenue by month" / "by quarter" / "by year" | DSL with grain on temporal dim |
-| `metric_by_dim` | "revenue by region" | DSL with one dimension |
-| `count_of_thing` | "count of orders" / "how many" / "total" | First `count` metric on the source |
-| `metric_filtered_by_value` | "revenue for west" | Equality filter on the column whose `example_values` contains the literal |
-| `single_metric` | "show me revenue" / "what's the p95 amount" | Bare metric selection |
+| `top_n_with_having` | "top 5 region by gross revenue where gross revenue > 100" | ORDER BY DESC + LIMIT + HAVING |
+| `top_n_by_metric` | "top \| biggest \| largest \| highest 5 region by gross revenue" | ORDER BY DESC + LIMIT |
+| `bottom_n_by_metric` | "bottom \| smallest \| lowest \| fewest \| least 5 region by gross revenue" | ORDER BY ASC + LIMIT |
+| `metric_by_dim` | "revenue by region" | One dimension |
+| `metric_by_two_dims` | "revenue by region by order_date" / "revenue by region, order_date" | Two named dims |
+| `metric_by_dim_and_grain` | "revenue by region by month" | One named dim + temporal at grain |
+| `multi_metric` | "gross revenue and order_count [by region]" | Two metrics, optional grouping |
+| `single_metric` | "show me revenue" / "what's the p95 amount" | Bare metric |
 
-Adding patterns is mechanical (decorator + builder). The architecture
+**Type-keyword routing** (find a metric of a specific primitive type)
+
+| Pattern | Example input | Routes to |
+|---|---|---|
+| `metric_by_type_keyword` | "unique \| distinct customers" | `count_distinct` metric |
+| | "max \| maximum / min \| minimum order amount" | `max` / `min` metric |
+| | "average \| avg \| mean order amount" | `avg` metric |
+| | "median amount" | `median` metric |
+| | "first \| last order amount" | `first_value` / `last_value` metric |
+| `metric_period_over_period` | "revenue yoy" / "revenue vs last year" / "revenue mom" / "revenue vs last quarter" | Existing `period_over_period` metric for the requested unit |
+| `metric_as_percent_of` | "gross revenue as percent of order count" / "X as % of Y" | Existing `ratio` metric whose numerator matches X and denominator matches Y |
+| `metric_anomalies` | "anomalies in revenue" / "anomaly in revenue" | Existing `anomaly_query` metric |
+| `metric_distribution` | "p95_amount distribution" | Existing `median` or `percentile` metric |
+
+**Time**
+
+| Pattern | Example input | Routes to |
+|---|---|---|
+| `metric_by_grain` | "revenue by month \| quarter \| year \| weekly \| yearly" | Grain on first temporal dim |
+| `metric_over_time` | "revenue trend \| over time \| across time" | Sugar for "by month" |
+| `metric_in_period` | "revenue in 2026" / "revenue in January 2026" | Half-open [year-start, year-end) filter |
+| `metric_in_date_range` | "revenue from 2026-01-01 to 2026-02-01" | Half-open ISO date range |
+| `metric_this_period` | "revenue this week \| month \| quarter \| year" | Current-period bounds (uses clock) |
+| `metric_last_n_period` | "revenue last \| past N days \| weeks \| months \| years" | Half-open [today-N, today+1) filter |
+
+**Filtering**
+
+| Pattern | Example input | Routes to |
+|---|---|---|
+| `metric_filtered_by_value` | "revenue for west" | One eq filter (column inferred from `example_values`) |
+| `metric_filter_compound` | "revenue for west and paid" | Two AND-ed eq filters |
+| `metric_excluding_value` | "revenue excluding paid" | One neq filter |
+| `metric_where` | "gross revenue where amount > 100" | Numeric comparison filter (>, <, >=, <=, =, !=) on a column |
+| `metric_where_between` | "gross revenue where amount between 50 and 200" | Inclusive numeric range filter |
+| `count_with_condition` | "count of paid orders" / "how many paid orders" | Count metric + eq filter |
+| `count_of_thing` | "count of orders" / "how many" / "total" | First count metric |
+
+Adding patterns is mechanical (decorator + builder). Slot resolution
+always validates against `AllowedSchema` — unknown metrics / dims /
+filter values fall through, never get fabricated. The architecture
 supports ~30 cleanly per the architecture estimate.
+
+### Shape primitives (Phase 3)
+
+Two shape primitives that don't fit a simple SELECT shape:
+
+**`cohort_filter`** counts entities matching BOTH a cohort-condition and a
+result-condition sub-query (2-CTE + JOIN):
+
+```yaml
+- id: jan_to_feb_returners
+  source: orders
+  type: cohort_filter
+  entity_column: customer_email
+  cohort_condition: "order_date >= '2026-01-01' AND order_date < '2026-02-01' AND status = 'paid'"
+  result_condition: "order_date >= '2026-02-01' AND order_date < '2026-03-01' AND status = 'paid'"
+```
+
+NL routes via `single_metric` ("show me jan_to_feb_returners"); a richer
+"customers who ordered ... and returned ..." parser requires the Phase 3
+entity recognizer.
+
+**`anomaly_query`** queries `gibran_quality_runs` for the failed runs of a
+named anomaly rule:
+
+```yaml
+- id: revenue_anomalies
+  source: orders
+  type: anomaly_query
+  rule_id: orders_revenue_anomaly  # references a rule_type='anomaly' quality_rule
+```
+
+Output rows: `(run_id, observed_value, ran_at, detected_anomaly)`. NL
+routes via `metric_anomalies` ("anomalies in revenue"). The compiled SQL
+reads from `gibran_quality_runs` rather than the metric's declared source
+— the DSL runner sets `bypasses_governance=True` on the compile result so
+the SQL-level source check is skipped (the DSL-level metric access check
+via `preview_schema` already gated the operation).
+
+### Not yet covered
+
+| Question shape | Why deferred |
+|---|---|
+| "customers who ordered last month and returned" | The `cohort_filter` primitive handles the SQL shape, but NL phrasing requires the Phase 3 entity recognizer. |
+| "what changed about X" / arbitrary paraphrasing | Embedding retrieval (Tier 5 Item 20) — only after pattern templates hit the ceiling and user feedback says the "I don't know" rate is unacceptable. |
 
 ## CLI reference
 
@@ -601,6 +690,8 @@ supports ~30 cleanly per the architecture estimate.
 | **`gibran approve <change_id> --by <name>`** | Apply a pending change from the approval queue. |
 | **`gibran detect-access-anomalies`** | Scan `gibran_query_log` for users whose query volume today is > N sigma above their trailing baseline. |
 | **`gibran check --watch --interval N`** | In-process scheduler: loops on N-second intervals. Local-dev / small-deployment shape only — production should use cron / systemd / k8s CronJob. |
+| **`gibran touch <source_id>`** | Bump a source's data-version token so the result cache invalidates cached rows. Useful after writing to a `duckdb_table` source externally. For `parquet` / `csv` the cache picks up file mtime automatically — no touch needed. |
+| **`gibran materialize [--metric <id>] [--full]`** | Refresh materialized-metric tables without a full sync. For `materialized_strategy: incremental` metrics, applies the DELETE + re-INSERT pass for dim-tuples newer than the last watermark. `--full` forces a full rebuild (e.g. for backfills). |
 
 ## Project layout
 
@@ -618,7 +709,7 @@ src/gibran/
   _sql.py             # qident, render_literal
   _source_dispatch.py # source_type -> FROM-clause snippet
 migrations/           # 0001 catalog -> 0009 tier4_governance
-tests/                # 456 tests across 23 files (+ benchmarks/)
+tests/                # 603 tests across 27 files (+ benchmarks/)
 prompts/
   architect_layer.md  # refined architect prompt with fixed constraints
 STATUS.md             # current per-layer state

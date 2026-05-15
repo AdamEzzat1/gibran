@@ -353,6 +353,32 @@ class DefaultGovernance:
         deps_by_metric: dict[str, list[str]] = {}
         for mid, dep in dep_rows:
             deps_by_metric.setdefault(mid, []).append(dep)
+
+        # For ratio metrics, parse the stored expression `{num}/{denom}`
+        # so MetricView can expose numerator/denominator explicitly.
+        # Avoids forcing NL pattern code to re-parse via the compile
+        # module's regex (and to re-query the catalog from there).
+        ratio_ids = [
+            r[0] for r in metric_rows if r[2] == "ratio"
+        ]
+        num_denom_by_metric: dict[str, tuple[str | None, str | None]] = {}
+        if ratio_ids:
+            import re as _re
+            _ratio_re = _re.compile(
+                r"^\{([a-zA-Z_][a-zA-Z0-9_]*)\}/\{([a-zA-Z_][a-zA-Z0-9_]*)\}$"
+            )
+            ratio_placeholders = ",".join(["?"] * len(ratio_ids))
+            expr_rows = self.con.execute(
+                "SELECT metric_id, expression FROM gibran_metric_versions "
+                "WHERE metric_id IN (" + ratio_placeholders + ") "
+                "AND effective_to IS NULL",
+                ratio_ids,
+            ).fetchall()
+            for mid, expr in expr_rows:
+                match = _ratio_re.match(expr or "")
+                if match:
+                    num_denom_by_metric[mid] = (match.group(1), match.group(2))
+
         return tuple(
             MetricView(
                 metric_id=mid,
@@ -361,6 +387,8 @@ class DefaultGovernance:
                 unit=unit,
                 description=desc,
                 depends_on=tuple(sorted(deps_by_metric.get(mid, []))),
+                numerator=num_denom_by_metric.get(mid, (None, None))[0],
+                denominator=num_denom_by_metric.get(mid, (None, None))[1],
             )
             for mid, display, mtype, unit, desc in metric_rows
         )
