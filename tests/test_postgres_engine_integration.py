@@ -181,7 +181,7 @@ def test_apply_all_migrations_against_postgres(clean_pg):
 
     engine = PostgresEngine(con=clean_pg)
     applied = apply_all_for_engine(engine, MIGRATIONS)
-    assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
     # Verify a representative table from each migration exists
     rows, _ = engine.query(

@@ -77,7 +77,7 @@ def test_apply_all_for_engine_duckdb_uses_flat_layout():
     con = duckdb.connect(":memory:")
     engine = DuckDBEngine(con)
     applied = apply_all_for_engine(engine, MIGRATIONS_DIR)
-    assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
 
 def test_apply_all_for_engine_idempotent():
@@ -158,7 +158,7 @@ def test_apply_all_for_engine_postgres():
         engine = PostgresEngine(con=con)
         applied = apply_all_for_engine(engine, MIGRATIONS_DIR)
         # All 9 migrations translated to Postgres as of 5A.5 cleanup.
-        assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
         # Verify the schema actually landed
         rows, _ = engine.query(

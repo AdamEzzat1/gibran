@@ -86,7 +86,7 @@ def test_init_with_duckdb_engine_applies_all_migrations(staged_env: Path):
                 "SELECT version FROM gibran_schema_version ORDER BY version"
             ).fetchall()
         ]
-        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     finally:
         con.close()
 

@@ -40,7 +40,7 @@ def main() -> None:
     # 1. Migrations: all 9 translated files should apply cleanly
     applied = apply_all_for_engine(engine, MIGRATIONS)
     print(f"[migrate] applied versions: {applied}")
-    assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9], f"unexpected: {applied}"
+    assert applied == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], f"unexpected: {applied}"
 
     # 2. Seed a tiny dataset
     with con.cursor() as cur:
