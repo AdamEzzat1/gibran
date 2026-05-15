@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gibran"
-version = "0.0.2"
-description = "Gibran: governed metric layer + non-LLM NL-to-SQL over DuckDB. 23 metric primitives (incl. cohort_retention, funnel, multi_stage_filter); identity-aware row + column governance; audit-log redaction; pattern-template NL with structural no-hallucination guarantee."
+version = "0.1.0"
+description = "Gibran: governed metric layer + non-LLM NL-to-SQL over DuckDB (Postgres/Snowflake/BigQuery via sqlglot). 25 metric primitives, 26 NL patterns, identity-aware row+column governance, audit-log redaction, optional local HTTP UI. Structural no-hallucination guarantee (pattern templates, never an LLM)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -80,3 +80,38 @@ packages = ["src/gibran"]
 # gibran package). If the build hasn't run, the directory is empty
 # and the server falls back to a JSON placeholder.
 artifacts = ["src/gibran/ui/static/**"]
+
+[tool.hatch.build.targets.sdist]
+# Explicit allow-list for the sdist. Without this, Hatch ships the
+# entire working tree -- including frontend/node_modules (8000+ files),
+# .git, .claude, gibran.duckdb, build/ artifacts, etc.
+include = [
+    "src/gibran/**",
+    "migrations/**",
+    "tests/**",
+    "tools/**",
+    "docs/**",
+    "frontend/src/**",
+    "frontend/package.json",
+    "frontend/vite.config.ts",
+    "frontend/vitest.setup.ts",
+    "frontend/tsconfig.json",
+    "frontend/index.html",
+    "frontend/README.md",
+    "README.md",
+    "ROADMAP.md",
+    "LICENSE",
+    "pyproject.toml",
+    "conftest.py",
+]
+exclude = [
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "**/node_modules",
+    "**/.git",
+    "**/.claude",
+    "**/*.duckdb",
+    "**/*.tsbuildinfo",
+    "**/dist",
+    "**/build",
+]
